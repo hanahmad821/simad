@@ -29,6 +29,7 @@ class DatabaseSeeder extends Seeder
             SubjectSeeder::class,
             LessonPeriodSeeder::class,
             RoomSeeder::class,
+            GtkSeeder::class,
         ]);
     }
 }
