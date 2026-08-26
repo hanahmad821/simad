@@ -41,4 +41,8 @@ class Gtk extends Model
     {
         return $this->hasMany(TeachingAssignment::class);
     }
+    public function attendances(): HasMany
+    {
+        return $this->hasMany(GtkAttendance::class);
+    }
 }
