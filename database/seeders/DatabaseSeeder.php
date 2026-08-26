@@ -28,6 +28,7 @@ class DatabaseSeeder extends Seeder
             SchoolClassSeeder::class,
             SubjectSeeder::class,
             LessonPeriodSeeder::class,
+            RoomSeeder::class,
         ]);
     }
 }
