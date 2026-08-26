@@ -25,7 +25,12 @@ class AcademicYear extends Model
         ];
     }
     public function semesters(): HasMany
-{
-    return $this->hasMany(Semester::class);
-}
+    {
+        return $this->hasMany(Semester::class);
+    }
+
+    public function teachingAssignments(): HasMany
+    {
+        return $this->hasMany(TeachingAssignment::class);
+    }
 }

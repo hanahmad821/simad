@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Gtk extends Model
 {
@@ -31,5 +32,13 @@ class Gtk extends Model
             'birth_date' => 'date',
             'is_active' => 'boolean',
         ];
+    }
+    public function educations(): HasMany
+    {
+        return $this->hasMany(GtkEducation::class);
+    }
+    public function teachingAssignments(): HasMany
+    {
+        return $this->hasMany(TeachingAssignment::class);
     }
 }
