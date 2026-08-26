@@ -37,4 +37,8 @@ class Semester extends Model
     {
         return $this->hasMany(TeachingAssignment::class);
     }
+    public function studentClassHistories(): HasMany
+    {
+        return $this->hasMany(StudentClassHistory::class);
+    }
 }
