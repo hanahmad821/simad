@@ -51,9 +51,10 @@
                         Mata Pelajaran
                     </flux:sidebar.item>
 
-                    <flux:sidebar.item icon="calendar-days">
+                    <flux:navlist.item icon="calendar-days" :href="route('admin.schedules.index')"
+                        :current="request()->routeIs('admin.schedules.*')" wire:navigate>
                         Jadwal
-                    </flux:sidebar.item>
+                    </flux:navlist.item>
                 </flux:sidebar.group>
 
 

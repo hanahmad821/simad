@@ -29,6 +29,8 @@ Route::middleware(['auth', 'verified'])->group(function () {
             ->name('gtks.index');
             Route::livewire('/gtks/{gtk}', 'admin.gtks.show')
             ->name('gtks.show');
+            Route::livewire('/schedules', 'admin.schedules.index')
+            ->name('schedules.index');
         });
 
 
