@@ -25,6 +25,10 @@ Route::middleware(['auth', 'verified'])->group(function () {
 
             Route::view('/dashboard', 'admin.dashboard')
                 ->name('dashboard');
+            Route::livewire('/gtks', 'admin.gtks.index')
+            ->name('gtks.index');
+            Route::livewire('/gtks/{gtk}', 'admin.gtks.show')
+            ->name('gtks.show');
         });
 
 
