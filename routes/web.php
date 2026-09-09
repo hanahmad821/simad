@@ -31,6 +31,10 @@ Route::middleware(['auth', 'verified'])->group(function () {
             ->name('gtks.show');
             Route::livewire('/schedules', 'admin.schedules.index')
             ->name('schedules.index');
+            Route::livewire('/students', 'admin.students.index')
+            ->name('students.index');
+            Route::livewire('/students/import', 'admin.students.import')
+            ->name('students.import');
         });
 
 

@@ -39,9 +39,11 @@
                         GTK
                     </flux:navlist.item>
 
-                    <flux:sidebar.item icon="academic-cap">
+                    <flux:navlist.item icon="academic-cap" :href="route('admin.students.index')"
+                        :current="request()->routeIs('admin.students.*')" wire:navigate>
                         Siswa
-                    </flux:sidebar.item>
+                    </flux:navlist.item>
+
 
                     <flux:sidebar.item icon="building-office-2">
                         Kelas
