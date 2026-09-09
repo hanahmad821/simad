@@ -18,6 +18,12 @@ new class extends Component {
 
     public array $notes = [];
 
+    public bool $scanMode = false;
+
+    public ?int $lastScannedStudentId = null;
+
+    public string $scanMessage = '';
+
     public function mount(): void
     {
         $this->attendanceDate = now()->format('Y-m-d');
@@ -48,7 +54,7 @@ new class extends Component {
      */
     public function getAttendanceSessionsProperty(): Collection
     {
-        if (! $this->attendanceDate) {
+        if (!$this->attendanceDate) {
             return collect();
         }
 
@@ -65,7 +71,7 @@ new class extends Component {
             ->where('day_of_week', $dayOfWeek)
             ->where('is_active', true)
             ->get()
-            ->sortBy(fn ($schedule) => $schedule->lessonPeriod->sort_order)
+            ->sortBy(fn($schedule) => $schedule->lessonPeriod->sort_order)
             ->values();
 
         $sessions = collect();
@@ -76,7 +82,7 @@ new class extends Component {
             $canMerge = $lastSession
                 && $lastSession->teaching_assignment_id === $schedule->teaching_assignment_id
                 && $lastSession->lesson_periods->last()->sort_order + 1 ===
-                    $schedule->lessonPeriod->sort_order;
+                $schedule->lessonPeriod->sort_order;
 
             if ($canMerge) {
                 $lastSession->schedules->push($schedule);
@@ -112,7 +118,7 @@ new class extends Component {
      */
     public function getSelectedSessionProperty(): ?object
     {
-        if (! $this->scheduleId) {
+        if (!$this->scheduleId) {
             return null;
         }
 
@@ -128,14 +134,14 @@ new class extends Component {
         $this->attendance = [];
         $this->notes = [];
 
-        if (! $this->scheduleId || ! $this->attendanceDate) {
+        if (!$this->scheduleId || !$this->attendanceDate) {
             return;
         }
 
         $session = $this->attendanceSessions
             ->firstWhere('id', $this->scheduleId);
 
-        if (! $session) {
+        if (!$session) {
             return;
         }
 
@@ -205,7 +211,7 @@ new class extends Component {
         $session = $this->attendanceSessions
             ->firstWhere('id', $this->scheduleId);
 
-        if (! $session) {
+        if (!$session) {
             return;
         }
 
@@ -239,7 +245,7 @@ new class extends Component {
      */
     public function getStudentsProperty(): Collection
     {
-        if (! $this->scheduleId || empty($this->attendance)) {
+        if (!$this->scheduleId || empty($this->attendance)) {
             return collect();
         }
 
@@ -247,6 +253,60 @@ new class extends Component {
             ->whereIn('id', array_keys($this->attendance))
             ->orderBy('full_name')
             ->get();
+    }
+
+    public function startScanner(): void
+    {
+        if (!$this->scheduleId) {
+            session()->flash('error', 'Pilih sesi KBM terlebih dahulu.');
+
+            return;
+        }
+
+        $this->scanMode = true;
+        $this->scanMessage = 'Arahkan kamera ke barcode kartu siswa.';
+    }
+
+    public function stopScanner(): void
+    {
+        $this->scanMode = false;
+        $this->scanMessage = '';
+    }
+
+    public function scanStudent(string $studentCode): void
+    {
+        if (!$this->scheduleId) {
+            $this->scanMessage = 'Pilih sesi KBM terlebih dahulu.';
+
+            return;
+        }
+
+        $student = Student::query()
+            ->where('student_code', trim($studentCode))
+            ->where('is_active', true)
+            ->first();
+
+        if (!$student) {
+            $this->scanMessage = 'Siswa tidak ditemukan.';
+
+            return;
+        }
+
+        if (!array_key_exists($student->id, $this->attendance)) {
+            $this->scanMessage =
+                "{$student->full_name} bukan siswa pada kelas ini.";
+
+            return;
+        }
+
+        $this->attendance[$student->id] = 'present';
+
+        $this->notes[$student->id] = '';
+
+        $this->lastScannedStudentId = $student->id;
+
+        $this->scanMessage =
+            "✓ {$student->full_name} — Hadir";
     }
 };
 ?>
@@ -275,16 +335,9 @@ new class extends Component {
     <flux:card>
         <div class="grid gap-4 md:grid-cols-2">
 
-            <flux:input
-                type="date"
-                wire:model.live="attendanceDate"
-                label="Tanggal"
-            />
+            <flux:input type="date" wire:model.live="attendanceDate" label="Tanggal" />
 
-            <flux:select
-                wire:model.live="scheduleId"
-                label="Sesi KBM"
-            >
+            <flux:select wire:model.live="scheduleId" label="Sesi KBM">
                 <option value="">Pilih sesi KBM</option>
 
                 @foreach ($this->attendanceSessions as $session)
@@ -403,15 +456,57 @@ new class extends Component {
                     </flux:text>
                 </div>
 
-                <flux:button
-                    variant="primary"
-                    wire:click="saveAttendance"
-                    wire:loading.attr="disabled"
-                >
-                    Simpan Presensi
-                </flux:button>
+                <div class="flex gap-2">
+                    <flux:button variant="outline" icon="qr-code" wire:click="startScanner"
+                        :disabled="!$this->selectedSession">
+                        Scan Barcode
+                    </flux:button>
+
+                    <flux:button variant="primary" wire:click="saveAttendance" wire:loading.attr="disabled">
+                        Simpan Presensi
+                    </flux:button>
+                </div>
 
             </div>
+
+            @if ($scanMode)
+
+                <flux:card>
+
+                    <div class="space-y-4">
+
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <flux:heading size="lg">
+                                    Scan Barcode Siswa
+                                </flux:heading>
+
+                                <flux:text>
+                                    Arahkan kamera ke barcode pada kartu siswa.
+                                </flux:text>
+                            </div>
+
+                            <flux:button variant="ghost" wire:click="stopScanner">
+                                Tutup
+                            </flux:button>
+                        </div>
+
+                        <div wire:ignore x-data="studentBarcodeScanner()" x-init="start()" class="mx-auto max-w-md">
+                            <video x-ref="video" class="aspect-video w-full rounded-lg bg-black object-cover" autoplay muted
+                                playsinline></video>
+                        </div>
+
+                        @if ($scanMessage)
+                            <flux:callout>
+                                {{ $scanMessage }}
+                            </flux:callout>
+                        @endif
+
+                    </div>
+
+                </flux:card>
+
+            @endif
 
             <div class="overflow-x-auto">
 
@@ -445,10 +540,7 @@ new class extends Component {
 
                         @foreach ($this->students as $index => $student)
 
-                            <tr
-                                wire:key="student-{{ $student->id }}"
-                                class="border-b"
-                            >
+                            <tr wire:key="student-{{ $student->id }}" class="border-b">
 
                                 <td class="px-3 py-3">
                                     {{ $index + 1 }}
@@ -464,9 +556,7 @@ new class extends Component {
 
                                 <td class="px-3 py-3">
 
-                                    <flux:select
-                                        wire:model="attendance.{{ $student->id }}"
-                                    >
+                                    <flux:select wire:model="attendance.{{ $student->id }}">
                                         <option value="present">
                                             Hadir
                                         </option>
@@ -492,10 +582,7 @@ new class extends Component {
 
                                 <td class="px-3 py-3">
 
-                                    <flux:input
-                                        wire:model="notes.{{ $student->id }}"
-                                        placeholder="Catatan..."
-                                    />
+                                    <flux:input wire:model="notes.{{ $student->id }}" placeholder="Catatan..." />
 
                                 </td>
 
@@ -524,3 +611,64 @@ new class extends Component {
     @endif
 
 </div>
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.data('studentBarcodeScanner', () => ({
+            reader: null,
+            controls: null,
+
+            async start() {
+                if (!window.BrowserMultiFormatReader) {
+                    console.error('ZXing belum tersedia.');
+                    return;
+                }
+
+                this.reader = new window.BrowserMultiFormatReader();
+
+                try {
+                    const devices =
+                        await window.BrowserMultiFormatReader.listVideoInputDevices();
+
+                    if (!devices.length) {
+                        this.$wire.scanMessage =
+                            'Kamera tidak ditemukan.';
+                        return;
+                    }
+
+                    // Prioritaskan kamera belakang jika tersedia.
+                    const backCamera =
+                        devices.find(device =>
+                            /back|rear|environment/i.test(device.label)
+                        ) ?? devices[0];
+
+                    this.controls =
+                        await this.reader.decodeFromVideoDevice(
+                            backCamera.deviceId,
+                            this.$refs.video,
+                            (result, error) => {
+                                if (result) {
+                                    this.$wire.scanStudent(
+                                        result.getText()
+                                    );
+                                }
+                            }
+                        );
+
+                } catch (error) {
+                    console.error(error);
+
+                    this.$wire.scanMessage =
+                        'Tidak dapat mengakses kamera.';
+                }
+            },
+
+            stop() {
+                if (this.controls) {
+                    this.controls.stop();
+                }
+
+                this.controls = null;
+            }
+        }));
+    });
+</script>
