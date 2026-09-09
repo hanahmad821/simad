@@ -35,6 +35,8 @@ Route::middleware(['auth', 'verified'])->group(function () {
             ->name('students.index');
             Route::livewire('/students/import', 'admin.students.import')
             ->name('students.import');
+            Route::livewire('/student-attendances', 'admin.student-attendances.index')
+            ->name('student-attendances.index');
         });
 
 
