@@ -15,17 +15,17 @@ new class extends Component {
     public ?int $editingId = null;
 
     public string $full_name = '';
-    public string $nip = '';
-    public string $nuptk = '';
+    public ?string $nip = null;
+    public ?string $nuptk = null;
     public string $gender = '';
     public string $birth_place = '';
     public string $birth_date = '';
     public string $employment_status = '';
-    public string $employee_number = '';
+    public ?string $employee_number = null;
     public string $position = '';
     public string $phone = '';
     public string $email = '';
-    public string $address = '';
+    public ?string $address = null;
     public bool $is_active = true;
 
     public function updatedSearch(): void
@@ -47,17 +47,17 @@ new class extends Component {
         $this->editingId = $gtk->id;
 
         $this->full_name = $gtk->full_name ?? '';
-        $this->nip = $gtk->nip ?? '';
-        $this->nuptk = $gtk->nuptk ?? '';
+        $this->nip = $gtk->nip ?? null;
+        $this->nuptk = $gtk->nuptk ?? null;
         $this->gender = $gtk->gender ?? '';
         $this->birth_place = $gtk->birth_place ?? '';
         $this->birth_date = $gtk->birth_date?->format('Y-m-d') ?? '';
         $this->employment_status = $gtk->employment_status ?? '';
-        $this->employee_number = $gtk->employee_number ?? '';
+        $this->employee_number = $gtk->employee_number ?? null;
         $this->position = $gtk->position ?? '';
         $this->phone = $gtk->phone ?? '';
         $this->email = $gtk->email ?? '';
-        $this->address = $gtk->address ?? '';
+        $this->address = $gtk->address ?? null;
         $this->is_active = (bool) $gtk->is_active;
 
         $this->resetValidation();
