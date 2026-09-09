@@ -86,7 +86,7 @@ new class extends Component {
 
             'gender' => [
                 'required',
-                Rule::in(['L', 'P']),
+                Rule::in(['male', 'female']),
             ],
 
             'birth_place' => ['nullable', 'string', 'max:100'],
@@ -95,7 +95,7 @@ new class extends Component {
 
             'employment_status' => [
                 'required',
-                Rule::in(['PNS', 'NonPNS', 'Yayasan']),
+                Rule::in(['pns', 'non_pns', 'yayasan']),
             ],
 
             'employee_number' => ['nullable', 'string', 'max:50'],
@@ -281,7 +281,7 @@ new class extends Component {
 
                                 @if ($gtk->gender)
                                     <div class="text-xs text-zinc-500">
-                                        {{ $gtk->gender === 'L' ? 'Laki-laki' : 'Perempuan' }}
+                                        {{ $gtk->gender === 'male' ? 'Laki-laki' : 'Perempuan' }}
                                     </div>
                                 @endif
                             </td>
@@ -311,7 +311,15 @@ new class extends Component {
 
                             {{-- Status Kepegawaian --}}
                             <td class="px-4 py-3">
-                                {{ $gtk->employment_status }}
+                                @if ($gtk->employment_status === 'pns')
+                                    PNS
+                                @elseif ($gtk->employment_status === 'non_pns')
+                                    Non-PNS
+                                @elseif ($gtk->employment_status === 'yayasan')
+                                    Yayasan
+                                @else
+                                    -
+                                @endif
                             </td>
 
 
@@ -443,11 +451,11 @@ new class extends Component {
                             Pilih jenis kelamin
                         </flux:select.option>
 
-                        <flux:select.option value="L">
+                        <flux:select.option value="male">
                             Laki-laki
                         </flux:select.option>
 
-                        <flux:select.option value="P">
+                        <flux:select.option value="female">
                             Perempuan
                         </flux:select.option>
                     </flux:select>
@@ -478,15 +486,15 @@ new class extends Component {
                             Pilih status
                         </flux:select.option>
 
-                        <flux:select.option value="PNS">
+                        <flux:select.option value="pns">
                             PNS
                         </flux:select.option>
 
-                        <flux:select.option value="NonPNS">
+                        <flux:select.option value="non_pns">
                             Non-PNS
                         </flux:select.option>
 
-                        <flux:select.option value="Yayasan">
+                        <flux:select.option value="yayasan">
                             Yayasan
                         </flux:select.option>
                     </flux:select>
