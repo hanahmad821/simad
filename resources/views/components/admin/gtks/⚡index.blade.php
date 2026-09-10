@@ -1,7 +1,9 @@
 <?php
 
 use App\Models\Gtk;
+use App\Models\User;
 use Illuminate\Validation\Rule;
+use Illuminate\Support\Str;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -165,10 +167,119 @@ new class extends Component {
         $this->resetValidation();
     }
 
+    public function generateAccount(int $gtkId): void
+    {
+        $gtk = Gtk::with('user')->findOrFail($gtkId);
+
+        if ($gtk->user) {
+            session()->flash('success', "GTK {$gtk->full_name} sudah memiliki akun.");
+            return;
+        }
+
+        User::create([
+            'name' => $gtk->full_name,
+            'email' => $this->generateEmail($gtk),
+            'password' => '12345678',
+            'role' => $this->determineRole($gtk),
+            'gtk_id' => $gtk->id,
+        ]);
+
+        session()->flash(
+            'success',
+            "Akun {$gtk->full_name} berhasil dibuat. Password awal: 12345678"
+        );
+    }
+
+    public function generateAllAccounts(): void
+    {
+        $gtks = Gtk::query()
+            ->where('is_active', true)
+            ->whereDoesntHave('user')
+            ->get();
+
+        if ($gtks->isEmpty()) {
+            session()->flash(
+                'success',
+                'Semua GTK aktif sudah memiliki akun.'
+            );
+
+            return;
+        }
+
+        $count = 0;
+
+        foreach ($gtks as $gtk) {
+            User::create([
+                'name' => $gtk->full_name,
+                'email' => $this->generateEmail($gtk),
+                'password' => '12345678',
+                'role' => $this->determineRole($gtk),
+                'gtk_id' => $gtk->id,
+            ]);
+
+            $count++;
+        }
+
+        session()->flash(
+            'success',
+            "{$count} akun GTK berhasil dibuat. Password awal: 12345678"
+        );
+    }
+
+    private function generateEmail(Gtk $gtk): string
+    {
+        if ($gtk->email) {
+            $email = strtolower(trim($gtk->email));
+
+            if (!User::where('email', $email)->exists()) {
+                return $email;
+            }
+        }
+
+        $base = Str::slug($gtk->full_name, '.');
+        $email = $base . '@simad.local';
+
+        $counter = 1;
+
+        while (User::where('email', $email)->exists()) {
+            $email = $base . $counter . '@simad.local';
+            $counter++;
+        }
+
+        return $email;
+    }
+
+    private function determineRole(Gtk $gtk): string
+    {
+        $position = Str::lower(trim($gtk->position ?? ''));
+
+        if (
+            Str::contains($position, [
+                'kepala madrasah',
+                'kepala sekolah',
+                'kamad',
+            ])
+        ) {
+            return 'headmaster';
+        }
+
+        if (
+            Str::contains($position, [
+                'guru',
+                'pengajar',
+            ])
+        ) {
+            return 'teacher';
+        }
+
+        return 'staff';
+    }
+
     public function with(): array
     {
         return [
             'gtks' => Gtk::query()
+                ->with('user')
                 ->when($this->search, function ($query) {
                     $query->where(function ($query) {
                         $query
@@ -198,9 +309,16 @@ new class extends Component {
             </flux:text>
         </div>
 
-        <flux:button variant="primary" icon="plus" wire:click="create">
-            Tambah GTK
-        </flux:button>
+        <div class="flex gap-2">
+            <flux:button variant="primary" icon="plus" wire:click="create">
+                Tambah GTK
+            </flux:button>
+
+            <flux:button variant="filled" icon="key" wire:click="generateAllAccounts"
+                wire:confirm="Generate akun untuk semua GTK aktif yang belum memiliki akun?">
+                Generate Semua Akun
+            </flux:button>
+        </div>
     </div>
 
 
@@ -252,6 +370,10 @@ new class extends Component {
 
                         <th class="px-4 py-3 text-center">
                             Status
+                        </th>
+
+                        <th class="px-4 py-3 text-center">
+                            Akun
                         </th>
 
                         <th class="px-4 py-3 text-right">
@@ -348,11 +470,29 @@ new class extends Component {
 
                             </td>
 
+                            <td class="px-4 py-3 text-center">
+                                @if ($gtk->user)
+                                    <flux:badge color="green">
+                                        Aktif
+                                    </flux:badge>
+                                @else
+                                    <flux:badge color="zinc">
+                                        Belum Ada
+                                    </flux:badge>
+                                @endif
+                            </td>
+
 
                             {{-- Action --}}
                             <td class="px-4 py-3">
 
                                 <div class="flex justify-end gap-2">
+                                    @if (!$gtk->user)
+                                        <flux:button size="sm" icon="key" wire:click="generateAccount({{ $gtk->id }})"
+                                            wire:confirm="Buat akun untuk {{ $gtk->full_name }}?">
+                                            Buat Akun
+                                        </flux:button>
+                                    @endif
 
                                     <flux:button size="sm" icon="eye" :href="route('admin.gtks.show', $gtk)" wire:navigate>
                                         Detail

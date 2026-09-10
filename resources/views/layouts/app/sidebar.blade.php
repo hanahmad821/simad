@@ -29,6 +29,23 @@
 
 
             {{-- ========================= --}}
+            {{-- ALL GTK --}}
+            {{-- ========================= --}}
+            @if(auth()->user()->isTeacher() || auth()->user()->isHeadmaster() || auth()->user()->isStaff())
+                <flux:sidebar.group heading="Presensi" class="grid">
+                    <flux:sidebar.item icon="map-pin" :href="route('gtk.attendance.index')"
+                        :current="request()->routeIs('gtk.attendance.index.*')" wire:navigate>
+                        Presensi Saya
+                    </flux:sidebar.item>
+
+                    <flux:sidebar.item icon="clock" :href="route('gtk.attendance.history')"
+                        :current="request()->routeIs('gtk.attendance.history.*')" wire:navigate>
+                        Riwayat Presensi
+                    </flux:sidebar.item>
+                </flux:sidebar.group>
+            @endif
+
+            {{-- ========================= --}}
             {{-- ADMIN --}}
             {{-- ========================= --}}
             @if(auth()->user()->isAdmin())
@@ -131,7 +148,7 @@
             {{-- ========================= --}}
             {{-- GURU --}}
             {{-- ========================= --}}
-            @if(auth()->user()->isTeacher())
+            @if(auth()->user()->isTeacher() || auth()->user()->isHeadmaster())
 
                 <flux:sidebar.group heading="Pembelajaran" class="grid">
                     <flux:sidebar.item icon="calendar-days">
@@ -142,18 +159,6 @@
                         Presensi Siswa
                     </flux:sidebar.item>
                 </flux:sidebar.group>
-
-
-                <flux:sidebar.group heading="Presensi" class="grid">
-                    <flux:sidebar.item icon="map-pin">
-                        Presensi Saya
-                    </flux:sidebar.item>
-
-                    <flux:sidebar.item icon="clock">
-                        Riwayat Presensi
-                    </flux:sidebar.item>
-                </flux:sidebar.group>
-
             @endif
 
 
