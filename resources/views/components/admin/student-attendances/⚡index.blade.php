@@ -301,8 +301,6 @@ new class extends Component {
 
         $this->attendance[$student->id] = 'present';
 
-        $this->notes[$student->id] = '';
-
         $this->lastScannedStudentId = $student->id;
 
         $this->scanMessage =
@@ -473,35 +471,22 @@ new class extends Component {
 
                 <flux:card>
 
-                    <div class="space-y-4">
+                    {{-- HANYA kamera yang wire:ignore --}}
+                    <div wire:ignore x-data="studentBarcodeScanner" x-init="start()">
+                        <video x-ref="video" class="w-full rounded-xl" autoplay muted playsinline></video>
 
-                        <div class="flex items-center justify-between">
-                            <div>
-                                <flux:heading size="lg">
-                                    Scan Barcode Siswa
-                                </flux:heading>
+                        <button type="button" @click="stop()">
+                            Tutup Scanner
+                        </button>
+                    </div>
 
-                                <flux:text>
-                                    Arahkan kamera ke barcode pada kartu siswa.
-                                </flux:text>
-                            </div>
-
-                            <flux:button variant="ghost" wire:click="stopScanner">
-                                Tutup
-                            </flux:button>
-                        </div>
-
-                        <div wire:ignore x-data="studentBarcodeScanner()" x-init="start()" class="mx-auto max-w-md">
-                            <video x-ref="video" class="aspect-video w-full rounded-lg bg-black object-cover" autoplay muted
-                                playsinline></video>
-                        </div>
-
+                    {{-- BAGIAN INI JANGAN wire:ignore --}}
+                    <div class="mt-3">
                         @if ($scanMessage)
-                            <flux:callout>
+                            <div class="rounded-lg p-3">
                                 {{ $scanMessage }}
-                            </flux:callout>
+                            </div>
                         @endif
-
                     </div>
 
                 </flux:card>
@@ -540,7 +525,9 @@ new class extends Component {
 
                         @foreach ($this->students as $index => $student)
 
-                            <tr wire:key="student-{{ $student->id }}" class="border-b">
+                            <tr wire:key="student-{{ $student->id }}" @class([
+                                'bg-green-50' => $lastScannedStudentId === $student->id,
+                            ])>
 
                                 <td class="px-3 py-3">
                                     {{ $index + 1 }}
@@ -611,6 +598,7 @@ new class extends Component {
     @endif
 
 </div>
+{{--
 <script>
     document.addEventListener('alpine:init', () => {
         Alpine.data('studentBarcodeScanner', () => ({
@@ -671,4 +659,4 @@ new class extends Component {
             }
         }));
     });
-</script>
+</script> --}}

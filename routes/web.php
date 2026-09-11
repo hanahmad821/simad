@@ -39,6 +39,8 @@ Route::middleware(['auth', 'verified'])->group(function () {
             ->name('student-attendances.index');
             Route::livewire('/gtk-attendances', 'admin.gtk-attendances.index')
             ->name('gtk-attendances.index');
+            Route::livewire('/holidays', 'admin.holidays.index')
+            ->name('holidays.index');
         });
 
         //gtk

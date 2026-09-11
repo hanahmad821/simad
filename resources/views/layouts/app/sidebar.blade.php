@@ -82,7 +82,8 @@
                         Presensi Siswa
                     </flux:sidebar.item>
 
-                    <flux:sidebar.item icon="map-pin">
+                    <flux:sidebar.item icon="map-pin" :href="route('admin.gtk-attendances.index')"
+                        :current="request()->routeIs('admin.gtk-attendances.*')">
                         Presensi GTK
                     </flux:sidebar.item>
                 </flux:sidebar.group>
@@ -107,6 +108,10 @@
                     <flux:sidebar.item icon="cog-6-tooth">
                         Profil Madrasah
                     </flux:sidebar.item>
+                    <flux:navlist.item icon="calendar-days" :href="route('admin.holidays.index')"
+                        :current="request()->routeIs('admin.holidays.*')">
+                        Hari Libur
+                    </flux:navlist.item>
                 </flux:sidebar.group>
 
             @endif
