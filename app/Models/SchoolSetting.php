@@ -9,17 +9,23 @@ class SchoolSetting extends Model
 {
     use HasFactory;
 
-    protected $fillable = [
-        'school_name',
-        'nsm',
-        'npsn',
-        'address',
-        'phone',
-        'email',
-        'latitude',
-        'longitude',
-        'attendance_radius',
-    ];
+protected $fillable = [
+    'school_name',
+    'nsm',
+    'npsn',
+    'address',
+    'phone',
+    'email',
+
+    'headmaster_name',
+    'headmaster_nip',
+    'headmaster_rank',
+    'headmaster_position',
+
+    'latitude',
+    'longitude',
+    'attendance_radius',
+];
 
     protected function casts(): array
     {

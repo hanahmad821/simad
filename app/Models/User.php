@@ -64,12 +64,12 @@ class User extends Authenticatable implements PasskeyUser
     }
 
     public function recordedStudentAttendances(): HasMany
-{
-    return $this->hasMany(
-        StudentAttendance::class,
-        'recorded_by'
-    );
-}
+    {
+        return $this->hasMany(
+            StudentAttendance::class,
+            'recorded_by'
+        );
+    }
     public function gtk(): BelongsTo
     {
         return $this->belongsTo(Gtk::class);
@@ -92,5 +92,29 @@ class User extends Authenticatable implements PasskeyUser
     public function isStaff(): bool
     {
         return $this->role === 'staff';
+    }
+
+    public function sentDispositions(): HasMany
+    {
+        return $this->hasMany(
+            LetterDisposition::class,
+            'from_user_id'
+        );
+    }
+
+    public function receivedDispositions(): HasMany
+    {
+        return $this->hasMany(
+            LetterDisposition::class,
+            'to_user_id'
+        );
+    }
+
+    public function outgoingLetters(): HasMany
+    {
+        return $this->hasMany(
+            OutgoingLetter::class,
+            'created_by'
+        );
     }
 }

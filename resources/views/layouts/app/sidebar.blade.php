@@ -31,7 +31,7 @@
             {{-- ========================= --}}
             {{-- ALL GTK --}}
             {{-- ========================= --}}
-            @if(auth()->user()->isTeacher() || auth()->user()->isHeadmaster() || auth()->user()->isStaff())
+            @if(auth()->user()->isTeacher() || auth()->user()->isHeadmaster() || auth()->user()->isStaff() || auth()->user()->isAdmin())
                 <flux:sidebar.group heading="Presensi" class="grid">
                     <flux:sidebar.item icon="map-pin" :href="route('gtk.attendance.index')"
                         :current="request()->routeIs('gtk.attendance.index.*')" wire:navigate>
@@ -43,6 +43,10 @@
                         Riwayat Presensi
                     </flux:sidebar.item>
                 </flux:sidebar.group>
+                <flux:navlist.item icon="clipboard-document-check" :href="route('gtk.dispositions.index')"
+                    :current="request()->routeIs('gtk.dispositions.*')">
+                    Disposisi Saya
+                </flux:navlist.item>
             @endif
 
             {{-- ========================= --}}
@@ -90,17 +94,19 @@
 
 
                 <flux:sidebar.group heading="Persuratan" class="grid">
-                    <flux:sidebar.item icon="inbox-arrow-down">
+                    <flux:navlist.item icon="inbox-arrow-down" :href="route('admin.incoming-letters.index')"
+                        :current="request()->routeIs('admin.incoming-letters.*')">
                         Surat Masuk
-                    </flux:sidebar.item>
+                    </flux:navlist.item>
 
                     <flux:sidebar.item icon="paper-airplane">
                         Disposisi
                     </flux:sidebar.item>
 
-                    <flux:sidebar.item icon="document-text">
+                    <flux:navlist.item icon="paper-airplane" :href="route('admin.outgoing-letters.index')"
+                        :current="request()->routeIs('admin.outgoing-letters.*')">
                         Surat Keluar
-                    </flux:sidebar.item>
+                    </flux:navlist.item>
                 </flux:sidebar.group>
 
 

@@ -41,10 +41,46 @@ Route::middleware(['auth', 'verified'])->group(function () {
             ->name('gtk-attendances.index');
             Route::livewire('/holidays', 'admin.holidays.index')
             ->name('holidays.index');
+            Route::livewire('/incoming-letters', 'admin.incoming-letters.index')
+            ->name('incoming-letters.index');
+            Route::livewire('/incoming-letters/{incomingLetter}/dispositions','admin.incoming-letters.dispositions')
+            ->name('incoming-letters.dispositions');
+            Route::livewire('/outgoing-letters', 'admin.outgoing-letters.index')
+            ->name('outgoing-letters.index');
+            Route::livewire('/outgoing-letters/{outgoingLetter}', 'admin.outgoing-letters.show')
+            ->name('outgoing-letters.show');
+            Route::get('/outgoing-letters/{outgoingLetter}/word',
+                [\App\Http\Controllers\Admin\OutgoingLetterController::class, 'word']
+            )->name('outgoing-letters.word');
+
+
+
+            Route::get('/students/search', function (\Illuminate\Http\Request $request) {
+                $search = $request->input('q', '');
+
+                return \App\Models\Student::query()
+                    ->where('is_active', true)
+                    ->when($search, function ($query) use ($search) {
+                        $query->where(function ($query) use ($search) {
+                            $query->where('full_name', 'like', "%{$search}%")
+                                ->orWhere('nis', 'like', "%{$search}%")
+                                ->orWhere('nisn', 'like', "%{$search}%");
+                        });
+                    })
+                    ->orderBy('full_name')
+                    ->limit(20)
+                    ->get()
+                    ->map(fn ($student) => [
+                        'id' => $student->id,
+                        'text' => $student->full_name
+                            . ($student->nis ? " — NIS: {$student->nis}" : '')
+                            . ($student->nisn ? " — NISN: {$student->nisn}" : ''),
+                    ]);
+            })->name('students.search');
         });
 
         //gtk
-        Route::middleware('role:teacher,staff,headmaster')
+        Route::middleware('role:teacher,staff,headmaster,admin')
         ->prefix('gtk')
         ->name('gtk.')
         ->group(function () {
@@ -52,6 +88,10 @@ Route::middleware(['auth', 'verified'])->group(function () {
             ->name('attendance.index');
             Route::livewire('/attendance/history', 'gtk.attendance.history')
             ->name('attendance.history');
+            Route::livewire('/dispositions', 'gtk.dispositions.index')
+            ->name('dispositions.index');
+            Route::livewire('/dispositions/{disposition}', 'gtk.dispositions.show')
+            ->name('dispositions.show');
         });
 
     // Kepala Madrasah
@@ -62,6 +102,11 @@ Route::middleware(['auth', 'verified'])->group(function () {
 
             Route::view('/dashboard', 'headmaster.dashboard')
                 ->name('dashboard');
+            Route::livewire('/outgoing-letters', 'headmaster.outgoing-letters.index')
+            ->name('outgoing-letters.index');
+
+            Route::livewire('/outgoing-letters/{outgoingLetter}', 'headmaster.outgoing-letters.show')
+            ->name('outgoing-letters.show');
         });
 
 
@@ -86,5 +131,19 @@ Route::middleware(['auth', 'verified'])->group(function () {
                 ->name('dashboard');
         });
 });
+
+// Route::get('/verify/{outgoingLetter}', function (
+//     \App\Models\OutgoingLetter $outgoingLetter
+// ) {
+//     $outgoingLetter->load([
+//         'letterType',
+//         'creator',
+//     ]);
+
+//     return view('verify-letter', compact('outgoingLetter'));
+// })->name('letters.verify');
+
+Route::get('/verify/{token}', \App\Http\Controllers\LetterVerificationController::class)
+    ->name('letters.verify');
 
 require __DIR__.'/settings.php';
