@@ -1,0 +1,16 @@
+<x-layouts::app title="Riwayat Pengelolaan Siswa"><div class="space-y-6">
+<div class="flex justify-between gap-3"><div><flux:heading size="xl">Riwayat Pengelolaan Siswa</flux:heading><flux:text>Setiap penyimpanan memiliki nomor proses. Koreksi mempertahankan catatan awal.</flux:text></div><flux:button :href="route('admin.student-progressions.index')">Proses Akhir Tahun</flux:button></div>
+@include('admin.classes.messages')
+<form method="GET" class="flex flex-wrap items-end gap-3"><flux:input label="Nama siswa" name="q" :value="request('q')" /><flux:select name="year_id" label="Tahun"><option value="">Semua</option>@foreach($years as $year)<option value="{{ $year->id }}" @selected(request('year_id')==$year->id)>{{ $year->name }}</option>@endforeach</flux:select><flux:select name="action" label="Proses"><option value="">Semua</option>@foreach(\App\Services\StudentLifecycleService::LABELS as $value=>$label)<option value="{{ $value }}" @selected(request('action')===$value)>{{ $label }}</option>@endforeach</flux:select><flux:button type="submit">Cari</flux:button><flux:button :href="route('admin.student-management.history')">Reset</flux:button></form>
+@foreach($events->groupBy('batch_id') as $batch=>$items)<flux:card class="space-y-4"><div><flux:heading>Proses {{ substr($batch,0,8) }}</flux:heading><flux:text>{{ $items->first()->created_at }} · {{ $items->first()->actor }} · {{ $items->first()->year_name }}</flux:text></div>
+@foreach($items as $event)
+<div class="border-t border-zinc-200 pt-4 dark:border-zinc-700"><div class="flex flex-wrap justify-between gap-2"><div class="font-medium">{{ $event->full_name ?: 'Tahun pelajaran' }}</div><flux:badge>{{ \App\Services\StudentLifecycleService::LABELS[$event->action] ?? 'Aktivasi tahun' }}</flux:badge></div>
+@if($event->reason)<flux:text>Alasan: {{ $event->reason }}</flux:text>@endif
+@php($after = json_decode($event->after,true))
+@if(isset($after['histories']))<flux:text>Penempatan tercatat: {{ collect($after['histories'])->filter(fn($h)=>empty($h['voided_at']))->map(fn($h)=>\App\Models\SchoolClass::find($h['school_class_id'])?->name.' ('.$h['starts_on'].' – '.$h['ends_on'].')')->join(', ') }}</flux:text>@endif
+@if(in_array($event->id,$corrected))<flux:text>Sudah dikoreksi. Catatan awal tetap tersimpan.</flux:text>
+@elseif($event->student_id && !in_array($event->action,['correct','reconcile']) && $event->kind!=='legacy')
+<details class="mt-3"><summary class="cursor-pointer text-sm underline">Koreksi hasil siswa ini</summary><form method="POST" action="{{ route('admin.student-management.preview') }}" class="mt-3 space-y-3">@csrf<input type="hidden" name="kind" value="correct"><input type="hidden" name="event_id" value="{{ $event->id }}"><input type="hidden" name="date" value="{{ today()->toDateString() }}"><flux:textarea name="reason" label="Alasan koreksi" required>{{ ($draft['event_id'] ?? null) == $event->id ? ($draft['reason'] ?? '') : '' }}</flux:textarea><flux:text>Sistem akan memeriksa proses lanjutan dan presensi sebelum menawarkan pemulihan kondisi sebelumnya.</flux:text><flux:button type="submit">Periksa Dampak Koreksi</flux:button></form></details>
+@endif</div>@endforeach</flux:card>@endforeach
+@if($events->isEmpty())<flux:callout>Belum ada riwayat yang sesuai filter.</flux:callout>@endif
+{{ $events->links() }}</div></x-layouts::app>

@@ -14,30 +14,6 @@ class RoomSeeder extends Seeder
     {
         $rooms = [
             [
-                'code' => 'R01',
-                'name' => 'Ruang Kelas 1',
-                'building' => 'Gedung Utama',
-                'capacity' => 36,
-            ],
-            [
-                'code' => 'R02',
-                'name' => 'Ruang Kelas 2',
-                'building' => 'Gedung Utama',
-                'capacity' => 36,
-            ],
-            [
-                'code' => 'R03',
-                'name' => 'Ruang Kelas 3',
-                'building' => 'Gedung Utama',
-                'capacity' => 36,
-            ],
-            [
-                'code' => 'R04',
-                'name' => 'Ruang Kelas 4',
-                'building' => 'Gedung Utama',
-                'capacity' => 36,
-            ],
-            [
                 'code' => 'LAB-IPA',
                 'name' => 'Laboratorium IPA',
                 'building' => 'Gedung Laboratorium',
@@ -52,10 +28,12 @@ class RoomSeeder extends Seeder
         ];
 
         foreach ($rooms as $room) {
-            Room::create([
+            Room::firstOrCreate(['code' => $room['code']], [
                 ...$room,
                 'is_active' => true,
             ]);
         }
+
+        $this->call(ClassroomSeeder::class);
     }
 }

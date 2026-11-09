@@ -6,7 +6,15 @@ use Laravel\Fortify\Features;
 test('login screen can be rendered', function () {
     $response = $this->get(route('login'));
 
-    $response->assertOk();
+    $response->assertOk()
+        ->assertDontSee('Sign in with a passkey')
+        ->assertDontSee('Sign up')
+        ->assertDontSee('/register', false);
+});
+
+test('passkey login endpoints are unavailable', function () {
+    $this->get('/passkeys/login/options')->assertNotFound();
+    $this->post('/passkeys/login')->assertNotFound();
 });
 
 test('users can authenticate using the login screen', function () {
@@ -64,4 +72,25 @@ test('users can logout', function () {
     $response->assertRedirect(route('home'));
 
     $this->assertGuest();
+});
+
+test('users with existing two factor secrets can login without a challenge', function () {
+    $user = User::factory()->withTwoFactor()->create();
+
+    $this->post(route('login.store'), [
+        'email' => $user->email,
+        'password' => 'password',
+    ])->assertSessionHasNoErrors()
+        ->assertRedirect(route('dashboard', absolute: false));
+
+    $this->assertAuthenticatedAs($user);
+});
+
+test('two factor endpoints are unavailable', function () {
+    $this->get('/two-factor-challenge')->assertNotFound();
+    $this->post('/two-factor-challenge')->assertNotFound();
+
+    $this->actingAs(User::factory()->create())
+        ->post('/user/two-factor-authentication')
+        ->assertNotFound();
 });

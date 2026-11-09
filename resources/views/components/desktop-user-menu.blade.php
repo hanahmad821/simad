@@ -15,9 +15,11 @@
             <div class="grid flex-1 text-start text-sm leading-tight">
                 <flux:heading class="truncate">{{ auth()->user()->name }}</flux:heading>
                 <flux:text class="truncate">{{ auth()->user()->email }}</flux:text>
+                <flux:text size="sm">{{ \App\Models\User::ROLE_LABELS[auth()->user()->activeRole()] ?? '' }}</flux:text>
             </div>
         </div>
         <flux:menu.separator />
+        <x-role-switcher />
         <flux:menu.radio.group>
             <flux:menu.item :href="route('profile.edit')" icon="cog" wire:navigate>
                 {{ __('Settings') }}

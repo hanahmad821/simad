@@ -4,7 +4,6 @@ use App\Models\Gtk;
 use App\Models\GtkEducation;
 use App\Models\AcademicYear;
 use App\Models\SchoolClass;
-use App\Models\Semester;
 use App\Models\Subject;
 use App\Models\TeachingAssignment;
 use Livewire\Component;
@@ -30,9 +29,6 @@ new class extends Component {
     public ?int $subjectId = null;
     public ?int $schoolClassId = null;
     public ?int $academicYearId = null;
-    public ?int $semesterId = null;
-
-    public int|string|null $teachingHours = null;
 
     public bool $assignmentIsActive = true;
 
@@ -40,10 +36,10 @@ new class extends Component {
     {
         $this->gtk = $gtk->load([
             'educations',
+            'teachingAssignments' => fn ($query) => $query->withCount('activeSchedules as scheduled_hours'),
             'teachingAssignments.subject',
             'teachingAssignments.schoolClass',
             'teachingAssignments.academicYear',
-            'teachingAssignments.semester',
         ]);
     }
 
@@ -214,8 +210,6 @@ new class extends Component {
         $this->subjectId = $assignment->subject_id;
         $this->schoolClassId = $assignment->school_class_id;
         $this->academicYearId = $assignment->academic_year_id;
-        $this->semesterId = $assignment->semester_id;
-        $this->teachingHours = $assignment->teaching_hours;
         $this->assignmentIsActive = (bool) $assignment->is_active;
 
         $this->resetValidation();
@@ -225,6 +219,9 @@ new class extends Component {
 
     public function saveAssignment(): void
     {
+        $editingAssignment = $this->editingAssignmentId
+            ? $this->gtk->teachingAssignments()->findOrFail($this->editingAssignmentId)
+            : null;
         $validated = $this->validate([
             'subjectId' => [
                 'required',
@@ -241,28 +238,27 @@ new class extends Component {
                 'exists:academic_years,id',
             ],
 
-            'semesterId' => [
-                'required',
-                'exists:semesters,id',
-            ],
-
-            'teachingHours' => [
-                'required',
-                'integer',
-                'min:1',
-                'max:50',
-            ],
-
             'assignmentIsActive' => [
                 'boolean',
             ],
         ]);
 
+        if (SchoolClass::findOrFail($validated['schoolClassId'])->academic_year_id != $validated['academicYearId']) {
+            $this->addError('schoolClassId', 'Pilih rombel pada tahun pelajaran yang sesuai.');
+            return;
+        }
+        $subject = Subject::findOrFail($validated['subjectId']);
+        if (! $subject->is_active && $editingAssignment?->subject_id !== $subject->id) {
+            $this->addError('subjectId', 'Pilih mata pelajaran yang aktif untuk penugasan baru.');
+
+            return;
+        }
+
         $exists = TeachingAssignment::query()
             ->where('subject_id', $validated['subjectId'])
             ->where('school_class_id', $validated['schoolClassId'])
             ->where('academic_year_id', $validated['academicYearId'])
-            ->where('semester_id', $validated['semesterId'])
+            ->where('is_active', true)
             ->when(
                 $this->editingAssignmentId,
                 function ($query) {
@@ -274,7 +270,7 @@ new class extends Component {
         if ($exists) {
             $this->addError(
                 'subjectId',
-                'Mata pelajaran tersebut sudah memiliki guru pengampu pada kelas, tahun pelajaran, dan semester yang dipilih.'
+                'Mata pelajaran tersebut sudah memiliki guru pengampu pada kelas dan tahun pelajaran yang dipilih.'
             );
 
             return;
@@ -284,8 +280,6 @@ new class extends Component {
             'subject_id' => $validated['subjectId'],
             'school_class_id' => $validated['schoolClassId'],
             'academic_year_id' => $validated['academicYearId'],
-            'semester_id' => $validated['semesterId'],
-            'teaching_hours' => $validated['teachingHours'],
             'is_active' => $validated['assignmentIsActive'],
         ];
 
@@ -312,10 +306,10 @@ new class extends Component {
         }
 
         $this->gtk->load([
+            'teachingAssignments' => fn ($query) => $query->withCount('activeSchedules as scheduled_hours'),
             'teachingAssignments.subject',
             'teachingAssignments.schoolClass',
             'teachingAssignments.academicYear',
-            'teachingAssignments.semester',
         ]);
 
         $this->closeAssignmentForm();
@@ -329,10 +323,10 @@ new class extends Component {
         $assignment->delete();
 
         $this->gtk->load([
+            'teachingAssignments' => fn ($query) => $query->withCount('activeSchedules as scheduled_hours'),
             'teachingAssignments.subject',
             'teachingAssignments.schoolClass',
             'teachingAssignments.academicYear',
-            'teachingAssignments.semester',
         ]);
 
         session()->flash(
@@ -355,8 +349,6 @@ new class extends Component {
             'subjectId',
             'schoolClassId',
             'academicYearId',
-            'semesterId',
-            'teachingHours',
         ]);
 
         $this->assignmentIsActive = true;
@@ -368,10 +360,13 @@ new class extends Component {
     {
         return [
             'subjects' => Subject::query()
+                ->where(fn ($query) => $query->where('is_active', true)
+                    ->when($this->editingAssignmentId, fn ($query) => $query->orWhereIn('id',
+                        $this->gtk->teachingAssignments()->whereKey($this->editingAssignmentId)->select('subject_id'))))
                 ->orderBy('name')
                 ->get(),
 
-            'schoolClasses' => SchoolClass::query()
+            'schoolClasses' => SchoolClass::query()->where('academic_year_id', $this->academicYearId)
                 ->orderBy('name')
                 ->get(),
 
@@ -379,9 +374,6 @@ new class extends Component {
                 ->orderByDesc('id')
                 ->get(),
 
-            'semesters' => Semester::query()
-                ->orderBy('id')
-                ->get(),
         ];
     }
 };
@@ -894,12 +886,8 @@ new class extends Component {
                                 Tahun Pelajaran
                             </th>
 
-                            <th class="px-4 py-3 text-left">
-                                Semester
-                            </th>
-
                             <th class="px-4 py-3 text-center">
-                                Jam
+                                JP Terjadwal / Minggu
                             </th>
 
                             <th class="px-4 py-3 text-center">
@@ -933,12 +921,8 @@ new class extends Component {
                                     {{ $assignment->academicYear?->name ?? '-' }}
                                 </td>
 
-                                <td class="px-4 py-3">
-                                    {{ $assignment->semester?->name ?? '-' }}
-                                </td>
-
                                 <td class="px-4 py-3 text-center">
-                                    {{ $assignment->teaching_hours }} JP
+                                    {{ $assignment->scheduled_hours }} JP
                                 </td>
 
                                 <td class="px-4 py-3 text-center">
@@ -1005,7 +989,7 @@ new class extends Component {
                 </flux:heading>
 
                 <flux:text class="mt-1">
-                    Tentukan mata pelajaran, kelas, dan beban mengajar GTK.
+                    Tentukan mata pelajaran, kelas, dan tahun pelajaran. Jumlah JP dihitung otomatis dari jadwal aktif.
                 </flux:text>
             </div>
 
@@ -1051,7 +1035,7 @@ new class extends Component {
                 <div class="grid gap-4 md:grid-cols-2">
 
                     {{-- Tahun Pelajaran --}}
-                    <flux:select label="Tahun Pelajaran" wire:model="academicYearId">
+                    <flux:select label="Tahun Pelajaran" wire:model.live="academicYearId">
 
                         <flux:select.option value="">
                             Pilih tahun pelajaran
@@ -1068,29 +1052,7 @@ new class extends Component {
                     </flux:select>
 
 
-                    {{-- Semester --}}
-                    <flux:select label="Semester" wire:model="semesterId">
-
-                        <flux:select.option value="">
-                            Pilih semester
-                        </flux:select.option>
-
-                        @foreach ($semesters as $semester)
-
-                            <flux:select.option value="{{ $semester->id }}">
-                                {{ $semester->name }}
-                            </flux:select.option>
-
-                        @endforeach
-
-                    </flux:select>
-
                 </div>
-
-
-                {{-- Beban Jam --}}
-                <flux:input type="number" label="Beban Mengajar" wire:model="teachingHours" placeholder="Contoh: 4"
-                    min="1" max="50" description="Masukkan jumlah Jam Pelajaran (JP) per minggu." />
 
 
                 {{-- Status --}}

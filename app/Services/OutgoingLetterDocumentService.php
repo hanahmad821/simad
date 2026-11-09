@@ -17,7 +17,11 @@ class OutgoingLetterDocumentService
     {
         $letter->loadMissing('letterType');
 
-        $template = $letter->letterType?->template_file;
+        $definition = app(LetterTemplateService::class)->definition($letter);
+        if (($definition['engine'] ?? null) === 'editor') {
+            throw new \RuntimeException('Template editor menggunakan keluaran PDF. Buka pratinjau atau PDF final surat.');
+        }
+        $template = $definition['template_file'] ?? $letter->letterType?->template_file;
 
         if (!$template) {
             throw new \RuntimeException(
@@ -116,10 +120,14 @@ class OutgoingLetterDocumentService
             mkdir($directory, 0755, true);
         }
 
-        if ($letter->status !== 'issued') {
+        if (! in_array($letter->status, ['issued', 'awaiting_signature'], true)) {
             abort(403, 'Surat belum diterbitkan.');
         }
 
+        $qrPath = null;
+        if ($letter->usesWetSignature()) {
+            $processor->setValue('qr_code', '');
+        } else {
         $verificationUrl = route(
             'letters.verify',
             $letter->verification_token
@@ -155,16 +163,43 @@ class OutgoingLetterDocumentService
             'height' => 90,
             'ratio' => true,
         ]);
+        }
 
-        $filename = 'surat-' . $letter->id . '-' . now()->format('YmdHis') . '.docx';
+        $filename =
+            'surat-' .
+            $letter->id .
+            '-final-' .
+            now()->format('YmdHis') .
+            '.docx';
 
-        $outputPath = $directory . '/' . $filename;
+        $outputPath =
+            $directory .
+            '/' .
+            $filename;
 
         $processor->saveAs($outputPath);
 
-        if (file_exists($qrPath)) {
+        /*
+        |--------------------------------------------------------------------------
+        | Simpan path dokumen final
+        |--------------------------------------------------------------------------
+        */
+
+        $letter->update([
+            'final_file' => 'generated/letters/' . $filename,
+            'final_docx_file' => 'generated/letters/' . $filename,
+        ]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Hapus QR temporary
+        |--------------------------------------------------------------------------
+        */
+
+        if ($qrPath && file_exists($qrPath)) {
             unlink($qrPath);
         }
+
         return $outputPath;
     }
 

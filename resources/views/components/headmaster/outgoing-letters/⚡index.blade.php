@@ -6,11 +6,18 @@ use Livewire\WithPagination;
 use Livewire\Component;
 
 new
-    #[Title('Persetujuan Surat Keluar')]
+    #[Title('Surat Keluar')]
     class extends Component {
     use WithPagination;
 
     public string $search = '';
+
+    public string $status = 'pending';
+
+    public function updatedStatus(): void
+    {
+        $this->resetPage();
+    }
 
     public function with(): array
     {
@@ -20,7 +27,8 @@ new
                     'letterType',
                     'creator',
                 ])
-                ->where('status', 'pending')
+                ->whereIn('status', ['pending', 'awaiting_signature', 'issued'])
+                ->when(in_array($this->status, ['pending', 'awaiting_signature', 'issued'], true), fn ($query) => $query->where('status', $this->status))
                 ->when($this->search, function ($query) {
                     $query->where(function ($query) {
                         $query
@@ -46,19 +54,25 @@ new
 
         <div>
             <flux:heading size="xl">
-                Persetujuan Surat Keluar
+                Surat Keluar
             </flux:heading>
 
             <flux:text class="mt-1">
-                Surat yang menunggu persetujuan Kepala Madrasah.
+                Tinjau pengajuan surat dan pantau surat yang sudah terbit.
             </flux:text>
         </div>
 
         <flux:card>
 
-            <div class="mb-4 max-w-md">
-                <flux:input wire:model.live.debounce.300ms="search" placeholder="Cari nomor, tujuan, atau perihal..."
+            <div class="mb-4 grid gap-4 md:grid-cols-3">
+                <flux:input class="md:col-span-2" label="Pencarian" wire:model.live.debounce.300ms="search" placeholder="Cari nomor, tujuan, atau perihal..."
                     icon="magnifying-glass" />
+                <flux:select wire:model.live="status" label="Status surat">
+                    <flux:select.option value="pending">Menunggu Persetujuan</flux:select.option>
+                    <flux:select.option value="awaiting_signature">Menunggu Tanda Tangan Basah</flux:select.option>
+                    <flux:select.option value="issued">Sudah Terbit</flux:select.option>
+                    <flux:select.option value="">Semua Pengajuan &amp; Terbit</flux:select.option>
+                </flux:select>
             </div>
 
             <div class="overflow-x-auto">
@@ -86,6 +100,8 @@ new
                             <th class="px-4 py-3 text-left font-medium">
                                 Dibuat Oleh
                             </th>
+
+                            <th class="px-4 py-3 text-left font-medium">Status</th>
 
                             <th class="px-4 py-3 text-right font-medium">
                                 Aksi
@@ -116,17 +132,26 @@ new
 
                                 <td class="px-4 py-3 whitespace-nowrap">
                                     {{ $letter->tanggal_surat?->translatedFormat('d F Y') }}
+                                    @if ($letter->status === 'issued' && $letter->approved_at)
+                                        <div class="mt-1 text-xs text-zinc-500">Terbit: {{ $letter->approved_at->format('d/m/Y H:i') }}</div>
+                                    @endif
                                 </td>
 
                                 <td class="px-4 py-3">
                                     {{ $letter->creator?->name ?? '-' }}
                                 </td>
 
+                                <td class="px-4 py-3">
+                                    <flux:badge :color="$letter->status === 'issued' ? 'green' : 'yellow'">
+                                        {{ $letter->statusLabel() }}
+                                    </flux:badge>
+                                </td>
+
                                 <td class="px-4 py-3 text-right">
 
                                     <flux:button size="sm" href="{{ route('headmaster.outgoing-letters.show', $letter) }}"
                                         wire:navigate icon="eye">
-                                        Review
+                                        {{ $letter->status === 'pending' ? 'Review' : 'Detail' }}
                                     </flux:button>
 
                                 </td>
@@ -136,8 +161,8 @@ new
                         @empty
 
                             <tr>
-                                <td colspan="6" class="px-4 py-10 text-center text-zinc-500">
-                                    Tidak ada surat yang menunggu persetujuan.
+                                <td colspan="7" class="px-4 py-10 text-center text-zinc-500">
+                                    Tidak ada surat yang sesuai dengan pencarian dan status yang dipilih.
                                 </td>
                             </tr>
 

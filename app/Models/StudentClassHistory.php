@@ -14,15 +14,20 @@ class StudentClassHistory extends Model
         'student_id',
         'school_class_id',
         'academic_year_id',
-        'semester_id',
+        'semester_id', 'starts_on', 'ends_on', 'voided_at',
         'is_active',
     ];
 
     protected function casts(): array
     {
         return [
-            'is_active' => 'boolean',
+            'is_active' => 'boolean', 'starts_on' => 'date', 'ends_on' => 'date', 'voided_at' => 'datetime',
         ];
+    }
+
+    public function scopeOnDate($query, $date)
+    {
+        return $query->whereNull('voided_at')->whereDate('starts_on', '<=', $date)->whereDate('ends_on', '>=', $date);
     }
 
     public function student(): BelongsTo
@@ -42,6 +47,7 @@ class StudentClassHistory extends Model
 
     public function semester(): BelongsTo
     {
+        // Legacy metadata only. Class membership is scoped by academic_year_id.
         return $this->belongsTo(Semester::class);
     }
 }

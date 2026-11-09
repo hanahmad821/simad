@@ -111,11 +111,20 @@ class LetterTypeSeeder extends Seeder
         ];
 
         foreach ($types as $type) {
-            LetterType::updateOrCreate(
+            $templateView = match ($type['name']) {
+                'Surat Keterangan Siswa' => 'pdf.letters.siswa-aktif',
+                'Surat Dispensasi' => 'pdf.letters.dispensasi',
+                'Surat Pemberitahuan' => 'pdf.letters.pemberitahuan',
+                'Surat Undangan' => 'pdf.letters.undangan',
+                'Surat Tugas' => 'pdf.letters.tugas',
+                default => null,
+            };
+            LetterType::firstOrCreate(
                 ['name' => $type['name']],
                 [
                     'code' => $type['code'],
-                    'fields' => $type['fields'],
+                    'fields' => $templateView ? config('letter_templates')[$templateView]['fields'] : $type['fields'],
+                    'template_view' => $templateView,
                     'is_active' => true,
                 ]
             );

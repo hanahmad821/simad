@@ -12,6 +12,10 @@ use App\Models\Student;
 
 new class extends \Livewire\Component {
     use WithPagination;
+    use \App\Livewire\Concerns\HasAssignmentRecipients;
+    use \Livewire\WithFileUploads;
+
+    public array $attachmentUploads = [];
 
     #[Url]
     public string $search = '';
@@ -29,10 +33,17 @@ new class extends \Livewire\Component {
     public string $tanggalSurat = '';
     public string $perihal = '';
     public string $isi = '';
+    public string $isiFormat = 'text';
     public bool $useTemplate = true;
+    public string $signatureMethod = 'qr';
     public string $keterangan = '';
 
     public array $formData = [];
+
+    public function boot(): void
+    {
+        abort_unless(auth()->user()?->canManageLetters(), 403);
+    }
 
     public function updatedSearch(): void
     {
@@ -63,10 +74,27 @@ new class extends \Livewire\Component {
     public function updatedLetterTypeIdForm(): void
     {
         $this->formData = [];
+        if ($this->isAssignmentLetter) $this->formData['penerima_tugas'] = [['gtk_id' => '', 'pangkat' => '']];
+        $this->reset('attachmentUploads');
+        if ($this->perihal === '') $this->perihal = $this->selectedLetterType?->name ?? '';
+    }
+
+    public function updatedUseTemplate(): void
+    {
+        $this->reset('attachmentUploads');
+    }
+
+    public function removeAttachmentUpload(int $index): void
+    {
+        unset($this->attachmentUploads[$index]);
+        $this->attachmentUploads = array_values($this->attachmentUploads);
+        $this->resetValidation(['attachmentUploads', 'attachmentUploads.*']);
     }
 
     public function with(): array
     {
+        $letterTypes = LetterType::query()->where('is_active', true)->orderBy('name')->get();
+
         return [
             'letters' => OutgoingLetter::query()
                 ->with(['letterType', 'creator'])
@@ -93,10 +121,8 @@ new class extends \Livewire\Component {
                 ->latest('id')
                 ->paginate(10),
 
-            'letterTypes' => LetterType::query()
-                ->where('is_active', true)
-                ->orderBy('name')
-                ->get(),
+            'letterTypes' => $letterTypes,
+            'templateLetterTypes' => $letterTypes->filter(fn ($type) => app(\App\Services\LetterTemplateCatalog::class)->availableFor($type)),
         ];
     }
 
@@ -127,7 +153,13 @@ new class extends \Livewire\Component {
     #[Computed]
     public function formFields(): array
     {
-        return $this->selectedLetterType?->fields ?? [];
+        return $this->selectedLetterType ? app(\App\Services\LetterTemplateCatalog::class)->fieldsFor($this->selectedLetterType) : [];
+    }
+
+    #[Computed]
+    public function usesBody(): bool
+    {
+        return app(\App\Services\LetterTemplateCatalog::class)->usesBody($this->selectedLetterType?->template_view);
     }
 
     public function openCreate(): void
@@ -137,12 +169,15 @@ new class extends \Livewire\Component {
             'tujuan',
             'perihal',
             'isi',
+            'isiFormat',
             'keterangan',
             'formData',
+            'attachmentUploads',
         ]);
 
         $this->tanggalSurat = now()->format('Y-m-d');
         $this->useTemplate = true;
+        $this->signatureMethod = 'qr';
         $this->showForm = true;
     }
 
@@ -156,11 +191,14 @@ new class extends \Livewire\Component {
             'tanggalSurat',
             'perihal',
             'isi',
+            'isiFormat',
             'keterangan',
             'formData',
+            'attachmentUploads',
         ]);
 
         $this->useTemplate = true;
+        $this->signatureMethod = 'qr';
         $this->resetValidation();
     }
 
@@ -182,11 +220,20 @@ new class extends \Livewire\Component {
 
     public function save(): void
     {
+        $this->validate(['letterTypeIdForm' => ['required', 'integer', 'exists:letter_types,id']]);
         $letterType = LetterType::query()
             ->where('is_active', true)
             ->findOrFail($this->letterTypeIdForm);
 
+        if ($this->useTemplate && ! app(\App\Services\LetterTemplateCatalog::class)->availableFor($letterType)) {
+            $this->addError('letterTypeIdForm', 'Jenis surat ini belum memiliki template baku. Pilih jenis lain atau gunakan Surat Manual.');
+            return;
+        }
+
+        $this->prepareAssignmentTarget();
+
         $rules = [
+            'signatureMethod' => ['required', 'in:qr,wet'],
             'letterTypeIdForm' => [
                 'required',
                 'exists:letter_types,id',
@@ -218,47 +265,27 @@ new class extends \Livewire\Component {
 
         /*
         |--------------------------------------------------------------------------
-        | Validasi field template
+        | Validasi field dinamis
         |--------------------------------------------------------------------------
+        |
+        | Hanya surat template yang memiliki field dinamis.
+        | Surat manual cukup menyimpan metadata surat.
+        |
         */
 
-        if ($this->useTemplate) {
-            foreach ($letterType->fields ?? [] as $field) {
-                $name = $field['name'];
-                $type = $field['type'] ?? 'text';
-                $required = $field['required'] ?? false;
-
-                if ($type === 'repeater') {
-                    $rules["formData.{$name}"] = $required
-                        ? ['required', 'array', 'min:1']
-                        : ['nullable', 'array'];
-
-                    $rules["formData.{$name}.*"] = [
-                        'required',
-                        'string',
-                        'max:1000',
-                    ];
-
-                    continue;
-                }
-
-                $fieldRules = $required
-                    ? ['required']
-                    : ['nullable'];
-
-                if ($type === 'student') {
-                    $fieldRules[] = 'exists:students,id';
-                } else {
-                    $fieldRules[] = 'string';
-                }
-
-                $fieldRules[] = 'max:5000';
-
-                $rules["formData.{$name}"] = $fieldRules;
-            }
-        }
+        $rules['isi'] = [$this->useTemplate && $this->usesBody ? 'required' : 'nullable', 'string', 'max:100000'];
 
         $this->validate($rules);
+        $this->validate(['isiFormat' => ['required', 'in:text,html']]);
+        if ($this->useTemplate && $this->usesBody) {
+            $this->isi = app(\App\Services\LetterBodyService::class)->clean($this->isi, $this->isiFormat);
+        }
+
+
+        if ($this->useTemplate) {
+            $catalog = app(\App\Services\LetterTemplateCatalog::class);
+            $this->validate(app(\App\Services\LetterTemplateService::class)->letterRules($catalog->fieldsFor($letterType)));
+        }
 
         /*
         |--------------------------------------------------------------------------
@@ -268,107 +295,122 @@ new class extends \Livewire\Component {
 
         $date = \Carbon\Carbon::parse($this->tanggalSurat);
 
-        $number = app(OutgoingLetterNumberService::class)
-            ->generate($letterType->code, $date);
 
         /*
         |--------------------------------------------------------------------------
-        | SURAT MANUAL
+        | Simpan surat
         |--------------------------------------------------------------------------
-        |
-        | Surat sudah dibuat di luar sistem.
-        | Sistem hanya booking nomor + mencatat metadata.
-        |
         */
 
-        if (!$this->useTemplate) {
-            OutgoingLetter::create([
-                'letter_type_id' => $letterType->id,
-
-                'nomor_urut' => $number['nomor_urut'],
-                'nomor_tahun' => $number['nomor_tahun'],
-                'nomor_surat' => $number['nomor_surat'],
-
-                'jenis_surat' => $letterType->name,
-
-                'use_template' => false,
-
-                'tujuan' => $this->tujuan,
-                'tanggal_surat' => $this->tanggalSurat,
-                'perihal' => $this->perihal,
-
-                'data' => null,
-                'isi' => null,
-
-                'keterangan' => $this->keterangan ?: null,
-
-                // Surat manual dianggap sudah terbit.
-                'status' => 'issued',
-
-                'created_by' => Auth::id(),
-            ]);
-
-            $this->closeForm();
-
-            session()->flash(
-                'success',
-                "Nomor surat berhasil dibooking: {$number['nomor_surat']}. Silakan upload dokumen surat melalui halaman detail."
-            );
-
-            return;
+        $outgoingLetter = app(\App\Services\OutgoingLetterAttachmentService::class)->create(Auth::user(), $this->attachmentUploads, function () use ($letterType, $date) {
+        $lockedType = LetterType::whereKey($letterType->id)->lockForUpdate()->firstOrFail();
+        abort_unless($lockedType->is_active, 422, 'Jenis surat tidak aktif. Pilih jenis surat aktif.');
+        if ($this->useTemplate) {
+            $catalog = app(\App\Services\LetterTemplateCatalog::class);
+            if (! $catalog->availableFor($lockedType)) throw \Illuminate\Validation\ValidationException::withMessages(['letterTypeIdForm' => 'Template baku tidak tersedia. Pilih ulang jenis surat.']);
+            $this->validate(app(\App\Services\LetterTemplateService::class)->letterRules($catalog->fieldsFor($lockedType)));
+            $this->validate(['isi' => [$catalog->usesBody($lockedType->template_view) ? 'required' : 'nullable', 'string', 'max:100000']]);
         }
-
-        /*
-        |--------------------------------------------------------------------------
-        | SURAT TEMPLATE
-        |--------------------------------------------------------------------------
-        */
-
-        OutgoingLetter::create([
+        $number = app(OutgoingLetterNumberService::class)->generate($lockedType->code, $date);
+        $letter = new OutgoingLetter([
             'letter_type_id' => $letterType->id,
 
             'nomor_urut' => $number['nomor_urut'],
             'nomor_tahun' => $number['nomor_tahun'],
             'nomor_surat' => $number['nomor_surat'],
 
-            'jenis_surat' => $letterType->name,
+            // Kompatibilitas dengan struktur lama
+            'jenis_surat' => $lockedType->name,
 
-            'use_template' => true,
+            'use_template' => $this->useTemplate,
+            'signature_method' => $this->signatureMethod,
 
             'tujuan' => $this->tujuan,
             'tanggal_surat' => $this->tanggalSurat,
             'perihal' => $this->perihal,
 
-            'data' => $this->formData,
+            /*
+            |--------------------------------------------------------------------------
+            | Data surat
+            |--------------------------------------------------------------------------
+            |
+            | Template:
+            |   simpan dynamic fields
+            |
+            | Manual:
+            |   belum ada dynamic fields
+            |
+            */
 
-            'isi' => $this->isi ?: null,
+            'data' => $this->useTemplate
+                ? $this->formData
+                : null,
+
+            /*
+            |--------------------------------------------------------------------------
+            | Isi surat
+            |--------------------------------------------------------------------------
+            |
+            | Surat manual tidak menggunakan isi dari sistem.
+            | Isinya berasal dari file PDF yang nanti diupload.
+            |
+            */
+
+            'isi' => $this->useTemplate
+                ? ($this->isi ?: null)
+                : null,
+
+            'isi_format' => $this->useTemplate ? $this->isiFormat : 'text',
             'keterangan' => $this->keterangan ?: null,
+
+            /*
+            |--------------------------------------------------------------------------
+            | Semua surat baru mulai dari draft
+            |--------------------------------------------------------------------------
+            |
+            | Template:
+            |   draft → pending → issued
+            |
+            | Manual:
+            |   draft → upload → pending → issued
+            |
+            */
 
             'status' => 'draft',
 
             'created_by' => Auth::id(),
         ]);
+        if ($this->useTemplate) app(\App\Services\LetterTemplateService::class)->capture($letter, $lockedType);
+        $letter->save();
+        return $letter;
+        });
 
         $this->closeForm();
 
-        session()->flash(
-            'success',
-            "Surat berhasil dibuat dengan nomor {$number['nomor_surat']}."
-        );
+        /*
+        |--------------------------------------------------------------------------
+        | Pesan berbeda berdasarkan jenis surat
+        |--------------------------------------------------------------------------
+        */
+
+        if ($outgoingLetter->use_template) {
+            session()->flash(
+                'success',
+                "Surat berhasil dibuat dengan nomor {$outgoingLetter->nomor_surat}."
+            );
+        } else {
+            session()->flash(
+                'success',
+                "Nomor surat {$outgoingLetter->nomor_surat} berhasil dibooking. Silakan upload dokumen surat melalui halaman detail."
+            );
+        }
     }
 
     public function submitForApproval(int $id): void
     {
         $letter = OutgoingLetter::findOrFail($id);
 
-        if ($letter->status !== 'draft') {
-            return;
-        }
-
-        $letter->update([
-            'status' => 'pending',
-            'rejection_reason' => null,
-        ]);
+        app(\App\Services\OutgoingLetterWorkflowService::class)->submit($letter);
 
         $this->dispatch(
             'notify',
@@ -381,6 +423,8 @@ new class extends \Livewire\Component {
 ?>
 
 <div class="space-y-6">
+
+    <flux:error name="documentFile" />
 
     <div class="flex items-center justify-between gap-4">
         <div>
@@ -425,6 +469,8 @@ new class extends \Livewire\Component {
                     Draft
                 </option>
 
+                <option value="pending">Menunggu Persetujuan</option>
+                <option value="awaiting_signature">Menunggu Tanda Tangan Basah</option>
                 <option value="issued">
                     Terbit
                 </option>
@@ -488,6 +534,7 @@ new class extends \Livewire\Component {
 
                                             <td class="px-4 py-3 font-medium whitespace-nowrap">
                                                 {{ $letter->nomor_surat }}
+                                                <div class="text-xs text-zinc-500">{{ $letter->signatureLabel() }}</div>
                                             </td>
 
                                             <td class="px-4 py-3">
@@ -539,21 +586,14 @@ new class extends \Livewire\Component {
 
                                                     <flux:badge
                                                         :color="match ($letter->status) {
-                                                                                                                                                                                                                                                                                                                                                                                                        'draft' => $letter->rejection_reason ? 'red' : 'zinc',
-                                                                                                                                                                                                                                                                                                                                                                                                        'pending' => 'yellow',
-                                                                                                                                                                                                                                                                                                                                                                                                        'issued' => 'green',
-                                                                                                                                                                                                                                                                                                                                                                                                        'cancelled' => 'red',
-                                                                                                                                                                                                                                                                                                                                                                                                        default => 'zinc',
-                                                                                                                                                                                                                                                                                                                                                                                                    }">
-                                                        {{ match ($letter->status) {
-                            'draft' => $letter->rejection_reason
-                                ? 'Perlu Revisi'
-                                : 'Draft',
-                            'pending' => 'Menunggu Persetujuan',
-                            'issued' => 'Terbit',
-                            'cancelled' => 'Dibatalkan',
-                            default => ucfirst($letter->status),
-                        } }}
+                                                                                                                                                                                                                                                                                                                                                                                                                            'draft' => $letter->rejection_reason ? 'red' : 'zinc',
+                                                                                                                                                                                                                                                                                                                                                                                                                            'awaiting_signature' => 'yellow',
+                            'pending' => 'yellow',
+                                                                                                                                                                                                                                                                                                                                                                                                                            'issued' => 'green',
+                                                                                                                                                                                                                                                                                                                                                                                                                            'cancelled' => 'red',
+                                                                                                                                                                                                                                                                                                                                                                                                                            default => 'zinc',
+                                                                                                                                                                                                                                                                                                                                                                                                                        }">
+                                                        {{ $letter->statusLabel() }}
                                                     </flux:badge>
 
                                                     @if ($letter->status === 'draft' && $letter->rejection_reason)
@@ -568,7 +608,7 @@ new class extends \Livewire\Component {
 
                                             <td class="px-4 py-3 text-right">
 
-                                                <flux:button href="{{ route('admin.outgoing-letters.show', $letter) }}" variant="ghost"
+                                                <flux:button href="{{ route((auth()->user()->isStaff() ? 'staff.' : 'admin.').'outgoing-letters.show', $letter) }}" variant="ghost"
                                                     size="sm" icon="eye">
                                                     Lihat
                                                 </flux:button>
@@ -610,7 +650,7 @@ new class extends \Livewire\Component {
 
     @if ($showForm)
 
-        <flux:modal wire:model.self="showForm" class="md:w-[700px]">
+        <flux:modal wire:model.self="showForm" class="w-[calc(100vw-2rem)] md:w-[960px] max-w-none">
 
             <div class="space-y-6">
 
@@ -653,13 +693,22 @@ new class extends \Livewire\Component {
                         </flux:description>
                     </div>
 
+<flux:select wire:model.live="signatureMethod" label="Metode tanda tangan">
+                        <option value="qr">QR Code persetujuan kepala sekolah</option>
+                        <option value="wet">Tanda tangan basah</option>
+                    </flux:select>
+                    <flux:error name="signatureMethod" />
+                    <flux:description>
+                        {{ $signatureMethod === 'wet' ? 'Setelah disetujui, cetak tanpa QR Code, minta tanda tangan kepala sekolah, lalu unggah scan PDF untuk arsip.' : 'QR Code verifikasi dibubuhkan setelah surat disetujui kepala sekolah.' }}
+                    </flux:description>
+
                     {{-- Jenis Surat --}}
                     <flux:select wire:model.live="letterTypeIdForm" label="Jenis Surat">
                         <option value="">
-                            Pilih jenis surat
+                            {{ $useTemplate ? 'Pilih jenis surat dengan template baku' : 'Pilih jenis surat' }}
                         </option>
 
-                        @foreach ($letterTypes as $type)
+                        @foreach ($useTemplate ? $templateLetterTypes : $letterTypes as $type)
                             <option value="{{ $type->id }}">
                                 {{ $type->name }} — Kode {{ $type->code }}
                             </option>
@@ -667,6 +716,9 @@ new class extends \Livewire\Component {
                     </flux:select>
 
                     <flux:error name="letterTypeIdForm" />
+                    @if ($useTemplate)
+                        <flux:description>Template mengikuti pengaturan Jenis Surat. @if(auth()->user()->isAdmin())<a href="{{ route('admin.letter-types.index') }}" class="underline">Kelola jenis surat</a>@endif</flux:description>
+                    @endif
 
                     {{-- Dynamic Fields - hanya Template --}}
                     @if ($useTemplate && $this->selectedLetterType)
@@ -686,16 +738,28 @@ new class extends \Livewire\Component {
                                     </flux:label>
 
                                     {{-- Text --}}
-                                    @if (($field['type'] ?? 'text') === 'text')
+                                    @if (($field['type'] ?? 'text') === 'gtk_assignments')
+                                        <x-assignment-recipients :field="$field['name']" :rows="$formData[$field['name']] ?? []" />
+                                    @elseif (($field['type'] ?? 'text') === 'text')
 
-                                        <flux:input wire:model="formData.{{ $field['name'] }}"
+                                        <flux:input aria-label="{{ $field['label'] }}" wire:model="formData.{{ $field['name'] }}"
                                             placeholder="{{ $field['placeholder'] ?? '' }}" />
 
                                         {{-- Textarea --}}
                                     @elseif ($field['type'] === 'textarea')
 
-                                        <flux:textarea wire:model="formData.{{ $field['name'] }}"
+                                        <flux:textarea aria-label="{{ $field['label'] }}" wire:model="formData.{{ $field['name'] }}"
                                             placeholder="{{ $field['placeholder'] ?? '' }}" />
+
+                                    @elseif ($field['type'] === 'date')
+                                        <flux:input aria-label="{{ $field['label'] }}" type="date" wire:model="formData.{{ $field['name'] }}" />
+                                    @elseif ($field['type'] === 'gtk')
+                                        <flux:select wire:model="formData.{{ $field['name'] }}">
+                                            <option value="">Pilih GTK</option>
+                                            @foreach (\App\Models\Gtk::where('is_active', true)->orderBy('full_name')->get() as $gtk)
+                                                <option value="{{ $gtk->id }}">{{ $gtk->full_name }}</option>
+                                            @endforeach
+                                        </flux:select>
 
                                         {{-- Student / Select2 --}}
                                     @elseif ($field['type'] === 'student')
@@ -768,7 +832,9 @@ new class extends \Livewire\Component {
                     @endif
 
                     {{-- Tujuan --}}
-                    <flux:input wire:model="tujuan" label="Tujuan" placeholder="Contoh: Orang Tua/Wali Siswa" />
+                    @if (!$this->isAssignmentLetter)
+                        <flux:textarea wire:model="tujuan" label="Tujuan" rows="2" placeholder="Contoh: Bapak/Ibu Orang Tua/Wali Murid&#10;MA Ma’arif NU 1 Kemranjen" />
+                    @endif
 
                     <flux:error name="tujuan" />
 
@@ -783,10 +849,15 @@ new class extends \Livewire\Component {
                     <flux:error name="perihal" />
 
                     {{-- Isi Surat - hanya Template --}}
-                    @if ($useTemplate)
-                        <flux:textarea wire:model="isi" label="Isi Surat" rows="6" placeholder="Isi surat..." />
+                    @if ($useTemplate && $this->usesBody)
+<x-letter-editor wire:key="create-letter-body-{{ $letterTypeIdForm }}" :sample="app(\App\Services\LetterTemplateCatalog::class)->find($this->selectedLetterType?->template_view)['default_body'] ?? ''" />
+                        <flux:description>Salam dan tanda tangan ditambahkan otomatis. Periksa susunan akhir melalui pratinjau PDF.</flux:description>
 
-                        <flux:error name="isi" />
+
+                    @endif
+
+                    @if ($useTemplate && $this->selectedLetterType?->template_view === 'pdf.letters.pemberitahuan')
+                        <x-letter-attachment-upload :uploads="$attachmentUploads" />
                     @endif
 
                     {{-- Keterangan --}}
@@ -803,7 +874,7 @@ new class extends \Livewire\Component {
                         Batal
                     </flux:button>
 
-                    <flux:button wire:click="save" variant="primary">
+                    <flux:button wire:click="save" wire:loading.attr="disabled" wire:target="attachmentUploads,save" variant="primary">
                         {{ $useTemplate ? 'Buat Surat' : 'Booking Nomor' }}
                     </flux:button>
 
@@ -854,3 +925,4 @@ new class extends \Livewire\Component {
     });
 </script>
 @endscript
+

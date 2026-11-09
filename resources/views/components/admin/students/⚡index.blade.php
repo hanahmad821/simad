@@ -21,7 +21,6 @@ new class extends Component
     #[Url]
     public string $schoolClassId = '';
     public ?int $academicYearId = null;
-    public ?int $semesterId = null;
 
     public int $perPage = 15;
 
@@ -74,13 +73,10 @@ new class extends Component
             ->where('is_active', true)
             ->value('id');
 
-        $this->semesterId = \App\Models\Semester::query()
-            ->where('is_active', true)
-            ->value('id');
     }
     public function getSchoolClassesProperty(): Collection
     {
-        return SchoolClass::query()
+        return SchoolClass::query()->where('academic_year_id', $this->academicYearId)
             ->where('is_active', true)
             ->orderBy('name')
             ->get();
@@ -91,10 +87,10 @@ new class extends Component
         return Student::query()
             ->with([
                 'classHistories' => function ($query) {
-                    $query
-                        ->with('schoolClass')
-                        ->where('is_active', true)
-                        ->latest('id');
+                    $query->whereNull('voided_at')->with(['schoolClass', 'academicYear'])->latest('id');
+                    if (! in_array($this->status, ['graduated', 'transferred', 'withdrawn'], true)) {
+                        $query->onDate(today())->where('academic_year_id', $this->academicYearId);
+                    }
                 },
             ])
             ->when(
@@ -112,22 +108,28 @@ new class extends Component
                 }
             )
             ->when(
-                $this->status === 'active',
+                $this->status === 'active' || $this->status === 'unplaced',
                 fn (Builder $query) =>
                     $query->where('is_active', true)
             )
+            ->when($this->status === 'unplaced', fn ($q) => $q->whereDoesntHave('classHistories', fn ($h) => $h->where('academic_year_id', $this->academicYearId)->whereNull('voided_at')->where('is_active', true)))
             ->when(
                 $this->status === 'inactive',
                 fn (Builder $query) =>
                     $query->where('is_active', false)
             )
             ->when(
+                in_array($this->status, ['graduated', 'transferred', 'withdrawn'], true),
+                fn (Builder $query) => $query->where('exit_status', $this->status)
+            )
+            ->when(
                 $this->schoolClassId !== '',
                 function (Builder $query) {
                     $query->whereHas('classHistories', function (Builder $query) {
-                        $query
-                            ->where('school_class_id', $this->schoolClassId)
-                            ->where('is_active', true);
+                        $query->where('school_class_id', $this->schoolClassId);
+                        if (! in_array($this->status, ['graduated', 'transferred', 'withdrawn'], true)) {
+                            $query->where('academic_year_id', $this->academicYearId)->onDate(today());
+                        }
                     });
                 }
             )
@@ -139,6 +141,10 @@ new class extends Component
     {
         $student = Student::query()->findOrFail($studentId);
 
+        if ($student->isArchived() || $student->classHistories()->exists() || $student->attendances()->exists()) {
+            $this->addError('student', 'Siswa dengan riwayat tidak dapat dihapus. Gunakan Ubah Status untuk pindah sekolah/keluar, atau Proses Akhir Tahun untuk kelulusan.');
+            return;
+        }
         $student->delete();
 
         session()->flash(
@@ -160,6 +166,7 @@ new class extends Component
             ->with([
                 'classHistories' => fn ($query) => $query
                     ->where('is_active', true)
+                    ->where('academic_year_id', $this->academicYearId)
                     ->latest('id'),
             ])
             ->findOrFail($studentId);
@@ -223,7 +230,6 @@ new class extends Component
 
             'isActive' => ['boolean'],
 
-            'studentClassId' => ['required', 'integer', 'exists:school_classes,id'],
         ]);
 
         $student = $this->editingStudentId
@@ -260,23 +266,10 @@ new class extends Component
                 ? ($validated['kipNumber'] ?: null)
                 : null,
 
-            'is_active' => $validated['isActive'],
+            'is_active' => $student->exists ? $student->is_active : true,
         ]);
 
         $student->save();
-
-        $student->classHistories()
-            ->where('is_active', true)
-            ->update([
-                'is_active' => false,
-            ]);
-
-        $student->classHistories()->create([
-            'school_class_id' => $validated['studentClassId'],
-            'academic_year_id' => $this->academicYearId,
-            'semester_id' => $this->semesterId,
-            'is_active' => true,
-        ]);
 
         $this->showForm = false;
 
@@ -351,6 +344,13 @@ new class extends Component
             </flux:text>
         </div>
 
+        <div class="flex flex-wrap gap-2">
+        <flux:button icon="arrow-up-tray" :href="route('admin.students.import')" wire:navigate>Impor Excel</flux:button>
+        <flux:button icon="arrow-trending-up" :href="route('admin.student-progressions.index')" wire:navigate>Proses Akhir Tahun</flux:button>
+        <flux:button icon="printer" target="_blank"
+            :href="route('admin.students.cards', ['search' => $search, 'status' => $status, 'school_class_id' => $schoolClassId])">
+            Cetak Kartu Siswa
+        </flux:button>
         <flux:button
             variant="primary"
             icon="plus"
@@ -358,6 +358,7 @@ new class extends Component
         >
             Tambah Siswa
         </flux:button>
+        </div>
 
     </div>
 
@@ -372,6 +373,8 @@ new class extends Component
         </flux:callout>
 
     @endif
+
+    @if($errors->any())<flux:callout variant="warning">{{ $errors->first() }}</flux:callout>@endif
 
     {{-- Filter --}}
     <flux:card class="p-4">
@@ -397,25 +400,16 @@ new class extends Component
                     Tidak Aktif
                 </option>
 
+                <option value="unplaced">Belum ditempatkan (tahun aktif)</option>
+                <option value="graduated">Lulus / Alumni</option>
+                <option value="transferred">Pindah Sekolah</option>
+                <option value="withdrawn">Keluar</option>
                 <option value="all">
                     Semua
                 </option>
             </flux:select>
 
-            <flux:select
-                label="Kelas"
-                wire:model.live="schoolClassId"
-            >
-                <option value="">
-                    Semua Kelas
-                </option>
-
-                @foreach ($this->schoolClasses as $schoolClass)
-                    <option value="{{ $schoolClass->id }}">
-                        {{ $schoolClass->name }}
-                    </option>
-                @endforeach
-            </flux:select>
+            <flux:text class="sm:col-span-2">Penempatan siswa dikelola melalui menu Kelas & Rombel. Form ini hanya mengubah biodata.</flux:text>
 
         </div>
 
@@ -529,25 +523,19 @@ new class extends Component
 
                             <td class="px-4 py-3">
 
-                                @if ($student->is_active)
-
-                                    <flux:badge color="green">
-                                        Aktif
-                                    </flux:badge>
-
-                                @else
-
-                                    <flux:badge color="zinc">
-                                        Tidak Aktif
-                                    </flux:badge>
-
-                                @endif
+                                <flux:badge :color="$student->is_active ? 'green' : 'zinc'">{{ $student->statusLabel() }}</flux:badge>
+                                @if($student->exit_date)<div class="mt-1 text-xs text-zinc-500">{{ $student->exit_date->format('d/m/Y') }}</div>@endif
 
                             </td>
 
                             <td class="px-4 py-3">
 
                                 <div class="flex justify-end gap-1">
+
+                                    <flux:button size="xs" variant="ghost" icon="identification" target="_blank"
+                                        :href="route('admin.students.cards', ['student_id' => $student->id, 'status' => 'all'])"
+                                        title="Cetak kartu siswa" aria-label="Cetak kartu {{ $student->full_name }}" />
+
 
                                     <flux:button
                                         size="xs"
@@ -557,6 +545,8 @@ new class extends Component
                                         title="Edit"
                                     />
 
+                                    @if(! $student->isArchived())
+                                    <flux:button size="xs" variant="ghost" icon="arrow-right-circle" :href="route('admin.students.status', $student)" title="Ubah Status" />
                                     <flux:button
                                         size="xs"
                                         variant="ghost"
@@ -566,6 +556,7 @@ new class extends Component
                                         wire:confirm="Yakin ingin menghapus data siswa {{ $student->full_name }}?"
                                         title="Hapus"
                                     />
+                                    @endif
 
                                 </div>
 
@@ -764,10 +755,7 @@ new class extends Component
 
         <div class="border-t border-zinc-200 pt-5 dark:border-zinc-700">
 
-            <flux:checkbox
-                label="Siswa Aktif"
-                wire:model="isActive"
-            />
+            <flux:text>Status siswa diubah melalui aksi Ubah Status atau Proses Akhir Tahun.</flux:text>
 
         </div>
 

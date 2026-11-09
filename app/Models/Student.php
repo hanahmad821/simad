@@ -10,6 +10,9 @@ class Student extends Model
     use HasFactory;
 
     protected $fillable = [
+        'exit_reason', 'destination_school', 'exit_status',
+        'exit_date',
+        'exit_academic_year_id',
         'student_code',
         'nis',
         'nisn',
@@ -34,11 +37,25 @@ class Student extends Model
     {
         return [
             'birth_date' => 'date',
+            'exit_date' => 'date',
             'pip_status' => 'boolean',
             'kip_status' => 'boolean',
             'is_active' => 'boolean',
         ];
     }
+    public function isArchived(): bool
+    {
+        return in_array($this->exit_status, ['graduated', 'transferred', 'withdrawn'], true);
+    }
+
+    public function statusLabel(): string
+    {
+        return match ($this->exit_status) {
+            'graduated' => 'Lulus', 'transferred' => 'Pindah', 'withdrawn' => 'Keluar',
+            default => $this->is_active ? 'Aktif' : 'Tidak Aktif',
+        };
+    }
+
     public function classHistories(): HasMany
     {
         return $this->hasMany(StudentClassHistory::class);

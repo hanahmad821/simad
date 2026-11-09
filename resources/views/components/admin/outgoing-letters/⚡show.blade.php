@@ -4,14 +4,19 @@ use App\Models\OutgoingLetter;
 use Livewire\Attributes\Title;
 use Livewire\Component;
 use App\Services\OutgoingLetterDocumentService;
+use App\Services\OutgoingLetterPdfService;
+use App\Services\PdfQrAnchorService;
+use Illuminate\Validation\ValidationException;
 use App\Models\LetterType;
 use Livewire\Attributes\Computed;
 use Livewire\WithFileUploads;
 use Illuminate\Support\Facades\Storage;
+
 new
     #[Title('Detail Surat Keluar')]
     class extends Component {
     use WithFileUploads;
+    use \App\Livewire\Concerns\HasAssignmentRecipients;
     public OutgoingLetter $outgoingLetter;
 
     public bool $editing = false;
@@ -20,10 +25,19 @@ new
     public string $tanggalSurat = '';
     public string $perihal = '';
     public string $isi = '';
+    public string $isiFormat = 'text';
     public bool $useTemplate = true;
+    public string $signatureMethod = 'qr';
+    public $signedDocument;
+    public array $attachmentUploads = [];
     public string $keterangan = '';
     public $documentFile;
     public array $formData = [];
+
+    public function boot(): void
+    {
+        abort_unless(auth()->user()?->canManageLetters(), 403);
+    }
 
     public function mount(OutgoingLetter $outgoingLetter): void
     {
@@ -35,7 +49,7 @@ new
 
     public function back(): void
     {
-        $this->redirectRoute('admin.outgoing-letters.index');
+        $this->redirectRoute((auth()->user()->isStaff() ? 'staff.' : 'admin.').'outgoing-letters.index');
     }
 
     public function generateWord()
@@ -59,14 +73,12 @@ new
     }
     public function submitForApproval(): void
     {
-        if ($this->outgoingLetter->status !== 'draft') {
+        try {
+            app(\App\Services\OutgoingLetterWorkflowService::class)->submit($this->outgoingLetter);
+        } catch (ValidationException $e) {
+            $this->addError('documentFile', $e->validator->errors()->first());
             return;
         }
-
-        $this->outgoingLetter->update([
-            'status' => 'pending',
-            'rejection_reason' => null,
-        ]);
 
         $this->outgoingLetter->refresh();
 
@@ -79,6 +91,7 @@ new
 
     public function edit(): void
     {
+        $this->outgoingLetter->refresh();
         if ($this->outgoingLetter->status !== 'draft') {
             return;
         }
@@ -87,7 +100,9 @@ new
         $this->tanggalSurat = $this->outgoingLetter->tanggal_surat?->format('Y-m-d') ?? '';
         $this->perihal = $this->outgoingLetter->perihal;
         $this->isi = $this->outgoingLetter->isi ?? '';
+        $this->isiFormat = $this->outgoingLetter->isi_format ?? 'text';
         $this->useTemplate = $this->outgoingLetter->use_template;
+        $this->signatureMethod = $this->outgoingLetter->signature_method ?? 'qr';
         $this->keterangan = $this->outgoingLetter->keterangan ?? '';
         $this->formData = $this->outgoingLetter->data ?? [];
 
@@ -97,22 +112,34 @@ new
     #[Computed]
     public function selectedLetterType(): ?LetterType
     {
-        return LetterType::find($this->letterTypeIdForm);
+        return $this->outgoingLetter->letterType;
     }
 
     #[Computed]
     public function formFields(): array
     {
-        return $this->selectedLetterType?->fields ?? [];
+        return $this->outgoingLetter->template_snapshot['fields'] ?? $this->selectedLetterType?->fields ?? [];
+    }
+
+    #[Computed]
+    public function usesBody(): bool
+    {
+        $definition = app(\App\Services\LetterTemplateService::class)->definition($this->outgoingLetter);
+        if (($definition['engine'] ?? null) === 'editor') return false;
+        return $definition['uses_body'] ?? app(\App\Services\LetterTemplateCatalog::class)->usesBody($definition['template_view'] ?? null);
     }
 
     public function updateLetter(): void
     {
+        $this->outgoingLetter->refresh();
         if ($this->outgoingLetter->status !== 'draft') {
             return;
         }
 
+        $this->prepareAssignmentTarget();
+
         $rules = [
+            'signatureMethod' => ['required', 'in:qr,wet'],
             'tujuan' => [
                 'required',
                 'string',
@@ -137,11 +164,15 @@ new
             ],
         ];
 
-        foreach ($this->formFields as $field) {
+        $rules['isi'] = [$this->outgoingLetter->use_template && $this->usesBody ? 'required' : 'nullable', 'string', 'max:100000'];
+
+        foreach ($this->outgoingLetter->use_template ? $this->formFields : [] as $field) {
 
             $name = $field['name'];
             $type = $field['type'] ?? 'text';
             $required = $field['required'] ?? false;
+
+            if ($type === 'gtk_assignments') continue;
 
             if ($type === 'repeater') {
 
@@ -174,21 +205,41 @@ new
         }
 
         $this->validate($rules);
+        $this->validate(['isiFormat' => ['required', 'in:text,html']]);
+        if ($this->outgoingLetter->use_template && $this->usesBody) {
+            $this->isi = app(\App\Services\LetterBodyService::class)->clean($this->isi, $this->isiFormat);
+        }
 
-        $this->outgoingLetter->update([
-            'tujuan' => $this->tujuan,
-            'tanggal_surat' => $this->tanggalSurat,
-            'perihal' => $this->perihal,
-            'use_template' => $this->useTemplate,
-            'data' => $this->formData,
-            'isi' => $this->isi ?: null,
-            'keterangan' => $this->keterangan ?: null,
+        if ($this->outgoingLetter->use_template) {
+            $this->validate(app(\App\Services\LetterTemplateService::class)->letterRules($this->formFields));
+        }
 
-            // Catatan revisi sudah ditindaklanjuti.
-            'rejection_reason' => null,
-        ]);
+        \Illuminate\Support\Facades\DB::transaction(function () {
+            $this->outgoingLetter = OutgoingLetter::whereKey($this->outgoingLetter->id)->lockForUpdate()->firstOrFail();
+            if ($this->outgoingLetter->status !== 'draft') {
+                throw ValidationException::withMessages(['perihal' => 'Surat sudah diajukan. Muat ulang halaman sebelum mengubah surat.']);
+            }
+            $this->outgoingLetter->update([
+                'tujuan' => $this->tujuan,
+                'tanggal_surat' => $this->tanggalSurat,
+                'perihal' => $this->perihal,
+                'signature_method' => $this->signatureMethod,
+                'data' => $this->formData,
+                'isi' => $this->isi ?: null,
+                'isi_format' => $this->isiFormat,
+                'keterangan' => $this->keterangan ?: null,
 
-        $this->outgoingLetter->refresh();
+                // Catatan revisi sudah ditindaklanjuti.
+                'rejection_reason' => null,
+            ]);
+
+            $this->outgoingLetter->refresh();
+
+            if ($this->outgoingLetter->use_template && $this->outgoingLetter->template_snapshot) {
+                app(\App\Services\LetterTemplateService::class)->capture($this->outgoingLetter);
+                $this->outgoingLetter->save();
+            }
+        });
 
         $this->editing = false;
 
@@ -199,13 +250,53 @@ new
         );
     }
 
+    public function removeAttachmentUpload(int $index): void
+    {
+        unset($this->attachmentUploads[$index]);
+        $this->attachmentUploads = array_values($this->attachmentUploads);
+        $this->resetValidation(['attachmentUploads', 'attachmentUploads.*']);
+    }
+
+    public function saveAttachments(): void
+    {
+        app(\App\Services\OutgoingLetterAttachmentService::class)->add(auth()->user(), $this->outgoingLetter, $this->attachmentUploads);
+        $this->reset('attachmentUploads');
+        $this->outgoingLetter->refresh();
+        $this->dispatch('notify', type: 'success', message: 'Lampiran berhasil disimpan.');
+    }
+
+    public function deleteAttachment(int $id): void
+    {
+        app(\App\Services\OutgoingLetterAttachmentService::class)->remove(auth()->user(), $this->outgoingLetter, $id);
+        $this->outgoingLetter->refresh();
+        $this->dispatch('notify', type: 'success', message: 'Lampiran berhasil dihapus.');
+    }
+
     public function uploadDocument(): void
     {
+        $this->outgoingLetter->refresh();
+        /*
+        |--------------------------------------------------------------------------
+        | Hanya surat manual
+        |--------------------------------------------------------------------------
+        */
+
         if ($this->outgoingLetter->use_template) {
             return;
         }
 
-        if ($this->outgoingLetter->status !== 'issued') {
+        /*
+        |--------------------------------------------------------------------------
+        | Dokumen hanya boleh diupload ketika masih draft / revisi
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            !in_array($this->outgoingLetter->status, [
+                'draft',
+                'revision',
+            ], true)
+        ) {
             return;
         }
 
@@ -213,23 +304,33 @@ new
             'documentFile' => [
                 'required',
                 'file',
-                'mimes:pdf,doc,docx',
+                'mimes:pdf',
                 'max:10240',
             ],
         ]);
 
-        if ($this->outgoingLetter->file) {
-            Storage::disk('public')->delete($this->outgoingLetter->file);
+        try {
+            if (! $this->outgoingLetter->usesWetSignature()) {
+                app(PdfQrAnchorService::class)->locate($this->documentFile->getRealPath());
+            }
+        } catch (\RuntimeException $e) {
+            throw ValidationException::withMessages(['documentFile' => $e->getMessage()]);
         }
 
-        $path = $this->documentFile->store(
-            'outgoing-letters',
-            'public'
-        );
-
-        $this->outgoingLetter->update([
-            'file' => $path,
-        ]);
+        $oldPath = $this->outgoingLetter->file;
+        $path = $this->documentFile->store('outgoing-letters/manual', 'public');
+        if (! $path) {
+            throw ValidationException::withMessages(['documentFile' => 'PDF gagal disimpan. Silakan coba lagi.']);
+        }
+        try {
+            $this->outgoingLetter->update(['file' => $path]);
+        } catch (\Throwable $e) {
+            Storage::disk('public')->delete($path);
+            throw $e;
+        }
+        if ($oldPath) {
+            Storage::disk('public')->delete($oldPath);
+        }
 
         $this->outgoingLetter->refresh();
 
@@ -240,6 +341,189 @@ new
             type: 'success',
             message: 'Dokumen surat berhasil diupload.'
         );
+    }
+
+    public function removeDocument(): void
+    {
+        $this->outgoingLetter->refresh();
+        if ($this->outgoingLetter->use_template) {
+            return;
+        }
+
+        if (
+            !in_array($this->outgoingLetter->status, [
+                'draft',
+                'revision',
+            ], true)
+        ) {
+            return;
+        }
+
+        if ($this->outgoingLetter->file) {
+            Storage::disk('public')->delete(
+                $this->outgoingLetter->file
+            );
+        }
+
+        $this->outgoingLetter->update([
+            'file' => null,
+        ]);
+
+        $this->outgoingLetter->refresh();
+
+        $this->dispatch(
+            'notify',
+            type: 'success',
+            message: 'Dokumen surat berhasil dihapus.'
+        );
+    }
+
+    public function downloadFinal()
+    {
+        if ($this->outgoingLetter->status !== 'issued') {
+            return;
+        }
+
+        if (!$this->outgoingLetter->final_file) {
+            $this->dispatch(
+                'notify',
+                type: 'error',
+                message: 'Dokumen final belum tersedia.'
+            );
+
+            return;
+        }
+
+        $path = storage_path(
+            'app/' . $this->outgoingLetter->final_file
+        );
+
+        if (!file_exists($path)) {
+            $this->dispatch(
+                'notify',
+                type: 'error',
+                message: 'File dokumen final tidak ditemukan.'
+            );
+
+            return;
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Nama file download
+        |--------------------------------------------------------------------------
+        |
+        | Nomor surat bisa mengandung "/" atau "\".
+        | Karakter tersebut harus dibersihkan karena nama file
+        | tidak boleh mengandung path separator.
+        |
+        */
+
+        $safeNomorSurat = str_replace(
+            ['/', '\\'],
+            '-',
+            $this->outgoingLetter->nomor_surat
+        );
+
+        $filename = 'Surat-' . $safeNomorSurat . '.docx';
+
+        return response()->download(
+            $path,
+            $filename
+        );
+    }
+    public function downloadFinalPdf()
+    {
+        if ($this->outgoingLetter->status !== 'issued') {
+            return;
+        }
+
+        if (!$this->outgoingLetter->final_pdf_file) {
+            $this->dispatch(
+                'notify',
+                type: 'error',
+                message: 'Dokumen final belum tersedia.'
+            );
+
+            return;
+        }
+
+        $path = storage_path(
+            'app/' . $this->outgoingLetter->final_pdf_file
+        );
+
+        if (!file_exists($path)) {
+            $this->dispatch(
+                'notify',
+                type: 'error',
+                message: 'File dokumen final tidak ditemukan.'
+            );
+
+            return;
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Nama file download
+        |--------------------------------------------------------------------------
+        |
+        | Nomor surat bisa mengandung "/" atau "\".
+        | Karakter tersebut harus dibersihkan karena nama file
+        | tidak boleh mengandung path separator.
+        |
+        */
+
+        $safeNomorSurat = str_replace(
+            ['/', '\\'],
+            '-',
+            $this->outgoingLetter->nomor_surat
+        );
+
+        $filename = 'Surat-' . $safeNomorSurat . '.pdf';
+
+        return response()->download(
+            $path,
+            $filename
+        );
+    }
+
+    public function uploadSignedDocument(): void
+    {
+        $this->validate(['signedDocument' => ['required', 'file', 'mimes:pdf', 'max:10240']]);
+        app(\App\Services\OutgoingLetterWorkflowService::class)->archiveSigned($this->outgoingLetter, $this->signedDocument);
+        $this->outgoingLetter->refresh();
+        $this->reset('signedDocument');
+        $this->dispatch('notify', type: 'success', message: 'Arsip tanda tangan basah tersimpan. Surat selesai.');
+    }
+
+    public function previewPdf()
+    {
+        try {
+            if (!$this->outgoingLetter->use_template) {
+                $this->dispatch(
+                    'notify',
+                    type: 'error',
+                    message: 'Preview ini hanya untuk surat template.'
+                );
+
+                return;
+            }
+
+            $path = app(OutgoingLetterPdfService::class)
+                ->preview($this->outgoingLetter);
+
+            return response()->file($path);
+
+        } catch (\Throwable $e) {
+            report($e);
+
+            $this->dispatch(
+                'notify',
+                type: 'error',
+                message: 'Gagal membuat preview PDF: ' .
+                $e->getMessage()
+            );
+        }
     }
 };
 ?>
@@ -273,9 +557,22 @@ new
                     Ajukan Persetujuan
                 </flux:button>
             @endif
-            <flux:button href="{{ route('admin.outgoing-letters.word', $outgoingLetter) }}" icon="document-arrow-down">
+            @if (
+                            $outgoingLetter->status === 'draft' &&
+                            $outgoingLetter->use_template
+                        )
+                        <flux:button href="{{ route(
+                    (auth()->user()->isStaff() ? 'staff.' : 'admin.').'outgoing-letters.preview',
+                    $outgoingLetter
+                ) }}" target="_blank" icon="eye">
+                            Preview PDF
+                        </flux:button>
+            @endif
+            @if ($outgoingLetter->use_template && in_array($outgoingLetter->status, ['issued', 'awaiting_signature'], true))
+            <flux:button href="{{ route((auth()->user()->isStaff() ? 'staff.' : 'admin.').'outgoing-letters.word', $outgoingLetter) }}" icon="document-arrow-down">
                 Generate Word
             </flux:button>
+            @endif
         </div>
     </div>
 
@@ -323,6 +620,16 @@ new
             <div>
                 <flux:heading size="lg">
                     {{ $outgoingLetter->letterType?->name ?? $outgoingLetter->jenis_surat }}
+
+                    @if ($outgoingLetter->use_template)
+                        <flux:badge color="blue">
+                            Template
+                        </flux:badge>
+                    @else
+                        <flux:badge color="zinc">
+                            Manual
+                        </flux:badge>
+                    @endif
                 </flux:heading>
 
                 <flux:text class="mt-1">
@@ -333,86 +640,38 @@ new
             @php
                 $statusColor = match ($outgoingLetter->status) {
                     'draft' => 'zinc',
+                    'awaiting_signature' => 'yellow',
                     'pending' => 'yellow',
                     'issued' => 'green',
                     'cancelled' => 'red',
                     default => 'zinc',
                 };
 
-                $statusLabel = match ($outgoingLetter->status) {
-                    'draft' => 'Draft',
-                    'pending' => 'Menunggu Persetujuan',
-                    'issued' => 'Terbit',
-                    'cancelled' => 'Dibatalkan',
-                    default => ucfirst($outgoingLetter->status),
-                };
+                $statusLabel = $outgoingLetter->statusLabel();
             @endphp
 
-            <flux:badge :color="$statusColor">
-                {{ $statusLabel }}
-            </flux:badge>
+            <div>
+                <flux:badge :color="$statusColor">
+                    {{ $statusLabel }}
+                </flux:badge>
+
+                @if ($outgoingLetter->status === 'issued')
+
+                    @if ($outgoingLetter->final_docx_file)
+                        <flux:button wire:click="downloadFinal" icon="document-text">
+                            Download Word
+                        </flux:button>
+                    @endif
+
+                    @if ($outgoingLetter->final_pdf_file)
+                        <flux:button wire:click="downloadFinalPdf" icon="document">
+                            Download PDF
+                        </flux:button>
+                    @endif
+                @endif
+            </div>
         </div>
 
-        @if (!$outgoingLetter->use_template && $outgoingLetter->status === 'issued')
-            <flux:card class="mt-6">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <flux:heading size="sm">
-                            Dokumen Surat
-                        </flux:heading>
-
-                        <flux:text class="mt-1 text-sm">
-                            Upload dokumen surat yang sudah dibuat dan ditandatangani.
-                        </flux:text>
-                    </div>
-
-                    @if ($outgoingLetter->file)
-                        <flux:badge color="green">
-                            Sudah diupload
-                        </flux:badge>
-                    @else
-                        <flux:badge color="amber">
-                            Belum ada dokumen
-                        </flux:badge>
-                    @endif
-                </div>
-
-                <div class="mt-4 space-y-4">
-                    <div>
-                        <flux:input type="file" wire:model="documentFile" accept=".pdf,.doc,.docx" label="Dokumen Surat" />
-
-                        <flux:text class="mt-1 text-xs text-zinc-500">
-                            Format PDF, DOC, atau DOCX. Maksimal 10 MB.
-                        </flux:text>
-
-                        @error('documentFile')
-                            <flux:text class="mt-1 text-sm text-red-600">
-                                {{ $message }}
-                            </flux:text>
-                        @enderror
-                    </div>
-
-                    <div class="flex items-center gap-2">
-                        <flux:button wire:click="uploadDocument" wire:loading.attr="disabled" wire:target="uploadDocument"
-                            variant="primary" icon="arrow-up-tray">
-                            <span wire:loading.remove wire:target="uploadDocument">
-                                Upload Dokumen
-                            </span>
-
-                            <span wire:loading wire:target="uploadDocument">
-                                Mengupload...
-                            </span>
-                        </flux:button>
-
-                        @if ($outgoingLetter->file)
-                            <flux:button :href="Storage::disk('public')->url($outgoingLetter->file)" target="_blank" icon="eye">
-                                Lihat Dokumen
-                            </flux:button>
-                        @endif
-                    </div>
-                </div>
-            </flux:card>
-        @endif
         <flux:separator />
 
 
@@ -483,9 +742,113 @@ new
 
     </flux:card>
 
+    @if (
+            !$outgoingLetter->use_template
+            && in_array($outgoingLetter->status, ['draft', 'revision'])
+        )
+
+        <flux:card class="mt-6">
+
+            <div class="space-y-1">
+                <flux:heading size="sm">
+                    Dokumen Surat
+                </flux:heading>
+
+                <flux:text class="text-sm">
+                    @if ($outgoingLetter->usesWetSignature())
+                        Unggah PDF surat sebelum diajukan untuk diperiksa kepala sekolah. Sediakan ruang tanda tangan basah; tidak perlu penanda QR Code.
+                    @else
+                    Upload PDF hasil ekspor Word dengan tepat satu penanda <code>[[QR_CODE]]</code> pada baris tersendiri.
+                    Gunakan teks 10–12 pt dan sisakan area putih 30 × 30 mm ke kanan dan bawah penanda.
+                    QR akan muncul di lokasi tersebut setelah Kepala Madrasah menyetujui surat. PDF hasil scan tidak didukung.
+                    @endif
+                </flux:text>
+            </div>
+
+            @error('documentFile')
+                <flux:error>{{ $message }}</flux:error>
+            @enderror
+
+            @if ($outgoingLetter->file)
+
+                <div class="mt-4 rounded-lg border border-zinc-200 p-4 dark:border-zinc-700">
+
+                    <div class="flex items-center justify-between gap-4">
+
+                        <div class="flex min-w-0 items-center gap-3">
+
+                            <div
+                                class="flex size-10 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-950/40 dark:text-blue-400">
+                                <flux:icon name="document-text" />
+                            </div>
+
+                            <div class="min-w-0">
+                                <div class="truncate text-sm font-medium">
+                                    {{ basename($outgoingLetter->file) }}
+                                </div>
+
+                                <div class="text-xs text-zinc-500">
+                                    Dokumen sumber surat manual
+                                </div>
+                            </div>
+
+                        </div>
+
+                        <div class="flex shrink-0 gap-2">
+
+                            <flux:button :href="Storage::disk('public')->url($outgoingLetter->file)" target="_blank" size="sm"
+                                variant="ghost" icon="eye">
+                                Lihat
+                            </flux:button>
+
+                            <flux:button wire:click="removeDocument" wire:confirm="Hapus dokumen surat ini?" size="sm"
+                                variant="ghost" icon="trash">
+                                Hapus
+                            </flux:button>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+            @else
+
+                <div class="mt-4 space-y-4">
+
+                    <flux:input type="file" wire:model="documentFile" accept=".pdf,application/pdf" label="File Surat" />
+
+                    <flux:text class="text-xs text-zinc-500">
+                        Format PDF, maksimal 10 MB. Untuk QR Code, teks harus dapat diseleksi.
+                    </flux:text>
+
+
+                    <div>
+
+                        <flux:button wire:click="uploadDocument" wire:loading.attr="disabled" wire:target="uploadDocument"
+                            variant="primary" icon="arrow-up-tray">
+                            <span wire:loading.remove wire:target="uploadDocument">
+                                Upload Dokumen
+                            </span>
+
+                            <span wire:loading wire:target="uploadDocument">
+                                Mengupload...
+                            </span>
+                        </flux:button>
+
+                    </div>
+
+                </div>
+
+            @endif
+
+        </flux:card>
+
+    @endif
+
 
     {{-- Data Surat --}}
-    @if ($outgoingLetter->letterType && count($outgoingLetter->letterType->fields ?? []))
+    @if (count($this->formFields))
         <flux:card class="space-y-6">
 
             <div>
@@ -502,7 +865,7 @@ new
 
             <div class="grid gap-6 sm:grid-cols-2">
 
-                @foreach ($outgoingLetter->letterType->fields ?? [] as $field)
+                @foreach ($this->formFields as $field)
 
                     @php
                         $name = $field['name'] ?? '';
@@ -511,13 +874,17 @@ new
                         $value = data_get($outgoingLetter->data ?? [], $name);
                     @endphp
 
-                    <div class="{{ $type === 'textarea' || $type === 'repeater' ? 'sm:col-span-2' : '' }}">
+                    <div class="{{ in_array($type, ['textarea', 'repeater', 'gtk_assignments']) ? 'sm:col-span-2' : '' }}">
 
                         <flux:text size="sm" class="text-zinc-500">
                             {{ $label }}
                         </flux:text>
 
-                        @if ($type === 'repeater')
+                        @if ($type === 'gtk_assignments')
+                            <x-assignment-recipient-summary :letter="$outgoingLetter" />
+                        @elseif ($type === 'date')
+                            <flux:text class="mt-1 font-medium">{{ $value ? \Carbon\Carbon::parse($value)->locale('id')->translatedFormat('l, d F Y') : '-' }}</flux:text>
+                        @elseif ($type === 'repeater')
 
                             @if (is_array($value) && count($value))
                                 <div class="mt-2 space-y-2">
@@ -583,8 +950,8 @@ new
 
             <flux:separator />
 
-            <div class="prose prose-sm max-w-none dark:prose-invert">
-                {!! nl2br(e($outgoingLetter->isi)) !!}
+            <div class="letter-body text-sm leading-7">
+                {!! app(\App\Services\LetterBodyService::class)->render($outgoingLetter) !!}
             </div>
 
         </flux:card>
@@ -607,24 +974,17 @@ new
     @endif
 
 
-    {{-- File --}}
-    @if ($outgoingLetter->file)
-        <flux:card class="flex items-center justify-between gap-4">
+    <x-outgoing-letter-attachments :letter="$outgoingLetter" :editable="true" :uploads="$attachmentUploads" />
 
-            <div>
-                <flux:heading size="sm">
-                    File Surat
-                </flux:heading>
+    <x-outgoing-letter-document :letter="$outgoingLetter" />
 
-                <flux:text class="mt-1">
-                    File surat yang tersimpan.
-                </flux:text>
-            </div>
-
-            <flux:button href="{{ Storage::url($outgoingLetter->file) }}" target="_blank" icon="arrow-top-right-on-square">
-                Buka File
-            </flux:button>
-
+    @if ($outgoingLetter->usesWetSignature() && $outgoingLetter->status === 'awaiting_signature')
+        <flux:card class="space-y-4">
+            <flux:heading size="lg">Unggah hasil tanda tangan basah</flux:heading>
+            <flux:text>Cetak dokumen yang disetujui, minta tanda tangan kepala sekolah, lalu unggah scan PDF. Surat selesai setelah arsip tersimpan.</flux:text>
+            <flux:input type="file" wire:model="signedDocument" accept=".pdf,application/pdf" label="Scan surat bertanda tangan (PDF, maksimal 10 MB)" />
+            <flux:error name="signedDocument" />
+            <flux:button wire:click="uploadSignedDocument" wire:loading.attr="disabled" wire:target="signedDocument,uploadSignedDocument" variant="primary">Simpan arsip dan selesaikan</flux:button>
         </flux:card>
     @endif
 
@@ -652,7 +1012,17 @@ new
                     </flux:text>
                 </div>
 
-                <flux:input wire:model="tujuan" label="Tujuan" />
+<flux:select wire:model.live="signatureMethod" label="Metode tanda tangan">
+                        <option value="qr">QR Code persetujuan kepala sekolah</option>
+                        <option value="wet">Tanda tangan basah</option>
+                    </flux:select>
+                    <flux:error name="signatureMethod" />
+                    <flux:description>
+                        {{ $signatureMethod === 'wet' ? 'Setelah disetujui, cetak tanpa QR Code, minta tanda tangan kepala sekolah, lalu unggah scan PDF untuk arsip.' : 'QR Code verifikasi dibubuhkan setelah surat disetujui kepala sekolah.' }}
+                    </flux:description>
+                @if (!$this->isAssignmentLetter)
+                    <flux:textarea wire:model="tujuan" label="Tujuan" rows="2" />
+                @endif
 
                 <flux:input type="date" wire:model="tanggalSurat" label="Tanggal Surat" />
 
@@ -666,7 +1036,9 @@ new
                         $type = $field['type'] ?? 'text';
                     @endphp
 
-                    @if ($type === 'repeater')
+                    @if ($type === 'gtk_assignments')
+                        <x-assignment-recipients :field="$name" :rows="$formData[$name] ?? []" />
+                    @elseif ($type === 'repeater')
 
                         <div class="space-y-2">
                             <flux:text class="font-medium">
@@ -712,6 +1084,17 @@ new
                             @endforeach
                         </flux:select>
 
+                    @elseif ($type === 'gtk')
+                        <flux:select wire:model="formData.{{ $name }}" label="{{ $label }}">
+                            <option value="">Pilih GTK</option>
+                            @foreach (\App\Models\Gtk::where('is_active', true)->orderBy('full_name')->get() as $gtk)
+                                <option value="{{ $gtk->id }}">{{ $gtk->full_name }}</option>
+                            @endforeach
+                        </flux:select>
+                    @elseif ($type === 'date')
+                        <flux:input type="date" wire:model="formData.{{ $name }}" label="{{ $label }}" />
+                    @elseif ($type === 'textarea')
+                        <flux:textarea wire:model="formData.{{ $name }}" label="{{ $label }}" />
                     @else
 
                         <flux:input wire:model="formData.{{ $name }}" label="{{ $label }}" />
@@ -720,7 +1103,10 @@ new
 
                 @endforeach
 
-                <flux:textarea wire:model="isi" label="Isi Surat" rows="8" />
+                @if ($this->outgoingLetter->use_template && $this->usesBody)
+<x-letter-editor wire:key="edit-letter-body-{{ $outgoingLetter->id }}" :sample="app(\App\Services\LetterTemplateCatalog::class)->find($outgoingLetter->template_snapshot['template_view'] ?? $this->selectedLetterType?->template_view)['default_body'] ?? ''" />
+                    <flux:description>Salam dan tanda tangan ditambahkan otomatis. Periksa susunan akhir melalui pratinjau PDF.</flux:description>
+                @endif
 
                 <flux:textarea wire:model="keterangan" label="Keterangan" rows="4" />
 

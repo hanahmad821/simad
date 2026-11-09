@@ -16,6 +16,7 @@ class LetterVerificationController extends Controller
             ])
             ->where('verification_token', $token)
             ->where('status', 'issued')
+            ->where('signature_method', 'qr')
             ->first();
 
         return view('letters.verify', [

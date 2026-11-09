@@ -6,6 +6,8 @@ use Illuminate\Contracts\Auth\MustVerifyEmail;
 /* @end-chisel-email-verification */
 use Flux\Flux;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Illuminate\Support\Facades\Session;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Title;
@@ -16,6 +18,16 @@ new #[Title('Profile settings')] class extends Component {
 
     public string $name = '';
     public string $email = '';
+    public string $nip = '';
+    public string $nuptk = '';
+    public string $gender = '';
+    public string $birth_place = '';
+    public string $birth_date = '';
+    public string $employment_status = '';
+    public string $employee_number = '';
+    public string $position = '';
+    public string $phone = '';
+    public string $address = '';
 
     /**
      * Mount the component.
@@ -24,6 +36,14 @@ new #[Title('Profile settings')] class extends Component {
     {
         $this->name = Auth::user()->name;
         $this->email = Auth::user()->email;
+
+        if ($gtk = Auth::user()->gtk) {
+            $this->name = $gtk->full_name;
+            foreach (['nip', 'nuptk', 'gender', 'birth_place', 'employment_status', 'employee_number', 'position', 'phone', 'address'] as $field) {
+                $this->{$field} = $gtk->{$field} ?? '';
+            }
+            $this->birth_date = $gtk->birth_date?->format('Y-m-d') ?? '';
+        }
     }
 
     /**
@@ -33,15 +53,42 @@ new #[Title('Profile settings')] class extends Component {
     {
         $user = Auth::user();
 
-        $validated = $this->validate($this->profileRules($user->id));
+        $gtk = $user->gtk;
+        $rules = $this->profileRules($user->id);
 
-        $user->fill($validated);
+        if ($gtk) {
+            $rules['name'] = ['required', 'string', 'max:150'];
+            $rules['email'][] = 'max:150';
+            $rules += [
+                'nip' => ['nullable', 'string', 'max:30', Rule::unique('gtks', 'nip')->ignore($gtk->id)],
+                'nuptk' => ['nullable', 'string', 'max:30', Rule::unique('gtks', 'nuptk')->ignore($gtk->id)],
+                'gender' => ['required', Rule::in(['male', 'female'])],
+                'birth_place' => ['nullable', 'string', 'max:100'],
+                'birth_date' => ['nullable', 'date'],
+                'employment_status' => ['required', Rule::in(['pns', 'non_pns', 'yayasan'])],
+                'employee_number' => ['nullable', 'string', 'max:50'],
+                'position' => ['nullable', 'string', 'max:100'],
+                'phone' => ['nullable', 'string', 'max:30'],
+                'address' => ['nullable', 'string'],
+            ];
+        }
+
+        $validated = $this->validate($rules);
+
+        $user->fill(['name' => $validated['name'], 'email' => $validated['email']]);
 
         if ($user->isDirty('email')) {
             $user->email_verified_at = null;
         }
 
-        $user->save();
+        DB::transaction(function () use ($user, $gtk, $validated) {
+            $user->save();
+
+            if ($gtk) {
+                $gtkData = collect($validated)->except('name')->map(fn ($value) => $value === '' ? null : $value)->all();
+                $gtk->update(['full_name' => $validated['name']] + $gtkData);
+            }
+        });
 
         Flux::toast(variant: 'success', text: __('Profile updated.'));
     }
@@ -71,12 +118,6 @@ new #[Title('Profile settings')] class extends Component {
         return Auth::user() instanceof MustVerifyEmail && ! Auth::user()->hasVerifiedEmail();
     }
 
-    #[Computed]
-    public function showDeleteUser(): bool
-    {
-        return ! Auth::user() instanceof MustVerifyEmail
-            || (Auth::user() instanceof MustVerifyEmail && Auth::user()->hasVerifiedEmail());
-    }
     /* @end-chisel-email-verification */
 }; ?>
 
@@ -85,9 +126,9 @@ new #[Title('Profile settings')] class extends Component {
 
     <flux:heading level="2" class="sr-only">{{ __('Profile settings') }}</flux:heading>
 
-    <x-pages::settings.layout :heading="__('Profile')" :subheading="__('Update your name and email address')">
+    <x-pages::settings.layout :heading="__('Profil')" :subheading="__('Perbarui profil dan data pribadi GTK Anda. Email ini juga digunakan untuk login.')">
         <form wire:submit="updateProfileInformation" class="my-6 w-full space-y-6">
-            <flux:input wire:model="name" :label="__('Name')" type="text" required autofocus autocomplete="name" />
+            <flux:input wire:model="name" label="Nama lengkap" type="text" required autofocus autocomplete="name" />
 
             <div>
                 <flux:input wire:model="email" :label="__('Email')" type="email" required autocomplete="email" />
@@ -113,6 +154,30 @@ new #[Title('Profile settings')] class extends Component {
                 {{-- @end-chisel-email-verification --}}
             </div>
 
+            @if (auth()->user()->gtk)
+                <div class="grid grid-cols-1 gap-6 sm:grid-cols-2">
+                    <flux:input wire:model="nip" label="NIP" />
+                    <flux:input wire:model="nuptk" label="NUPTK" />
+                    <flux:select wire:model="gender" label="Jenis kelamin" required>
+                        <option value="">Pilih jenis kelamin</option>
+                        <option value="male">Laki-laki</option>
+                        <option value="female">Perempuan</option>
+                    </flux:select>
+                    <flux:input wire:model="birth_place" label="Tempat lahir" />
+                    <flux:input wire:model="birth_date" label="Tanggal lahir" type="date" />
+                    <flux:select wire:model="employment_status" label="Status kepegawaian" required>
+                        <option value="">Pilih status kepegawaian</option>
+                        <option value="pns">PNS</option>
+                        <option value="non_pns">Non PNS</option>
+                        <option value="yayasan">Yayasan</option>
+                    </flux:select>
+                    <flux:input wire:model="employee_number" label="Nomor pegawai" />
+                    <flux:input wire:model="position" label="Jabatan" />
+                    <flux:input wire:model="phone" label="Nomor telepon" type="tel" autocomplete="tel" />
+                </div>
+                <flux:textarea wire:model="address" label="Alamat" autocomplete="street-address" />
+            @endif
+
             <div class="flex items-center gap-4">
                 <div class="flex items-center justify-end">
                     <flux:button variant="primary" type="submit" class="w-full" data-test="update-profile-button">
@@ -123,12 +188,9 @@ new #[Title('Profile settings')] class extends Component {
             </div>
         </form>
 
-        {{-- @chisel-email-verification --}}
-        @if ($this->showDeleteUser)
-        {{-- @end-chisel-email-verification --}}
-            <livewire:pages::settings.delete-user-form />
-        {{-- @chisel-email-verification --}}
+        @if (auth()->user()->gtk)
+            <livewire:pages::settings.education />
         @endif
-        {{-- @end-chisel-email-verification --}}
+
     </x-pages::settings.layout>
 </section>

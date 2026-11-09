@@ -11,19 +11,26 @@
         class="border-e border-zinc-200 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900">
 
         {{-- Logo --}}
-        <flux:sidebar.header>
-            <x-app-logo :sidebar="true" href="{{ route('dashboard') }}" wire:navigate />
+        <div class="space-y-1">
+            <flux:sidebar.header>
+                <x-app-logo :sidebar="true" href="{{ route('dashboard') }}" wire:navigate />
 
-            <flux:sidebar.collapse class="lg:hidden" />
-        </flux:sidebar.header>
+                <flux:sidebar.collapse class="lg:hidden" />
+            </flux:sidebar.header>
 
+            <div class="text-xs font-normal leading-snug text-zinc-500 dark:text-zinc-400">
+                {{ \App\Models\SchoolSetting::query()->first()?->school_name ?: 'MA Ma’arif NU 1 Kemranjen' }}
+            </div>
+
+
+        </div>
 
         {{-- Navigation --}}
         <flux:sidebar.nav>
 
             {{-- Dashboard --}}
-            <flux:sidebar.item icon="home" :href="route('dashboard')" :current="request()->routeIs('dashboard')"
-                wire:navigate>
+            <flux:sidebar.item icon="home" :href="route('dashboard')"
+                :current="request()->routeIs('dashboard', '*.dashboard')" wire:navigate>
                 Dashboard
             </flux:sidebar.item>
 
@@ -31,7 +38,7 @@
             {{-- ========================= --}}
             {{-- ALL GTK --}}
             {{-- ========================= --}}
-            @if(auth()->user()->isTeacher() || auth()->user()->isHeadmaster() || auth()->user()->isStaff() || auth()->user()->isAdmin())
+            @if(auth()->user()->canTeach() || auth()->user()->isHeadmaster() || auth()->user()->isStaff() || auth()->user()->isAdmin())
                 <flux:sidebar.group heading="Presensi" class="grid">
                     <flux:sidebar.item icon="map-pin" :href="route('gtk.attendance.index')"
                         :current="request()->routeIs('gtk.attendance.index.*')" wire:navigate>
@@ -42,7 +49,21 @@
                         :current="request()->routeIs('gtk.attendance.history.*')" wire:navigate>
                         Riwayat Presensi
                     </flux:sidebar.item>
+                    @if(auth()->user()->gtk_id)
+                        <flux:sidebar.item icon="document-plus" :href="route('gtk.absences.index')"
+                            :current="request()->routeIs('gtk.absences.*')" wire:navigate>
+                            Pengajuan Absensi
+                        </flux:sidebar.item>
+                    @endif
                 </flux:sidebar.group>
+                <flux:sidebar.item icon="clipboard-document-list" :href="route('gtk.lckh.index')"
+                    :current="request()->routeIs('gtk.lckh.index')" wire:navigate>
+                    LCKH
+                </flux:sidebar.item>
+                <flux:sidebar.item icon="clock" :href="route('gtk.lckh.history')"
+                    :current="request()->routeIs('gtk.lckh.history')" wire:navigate>
+                    Riwayat LCKH
+                </flux:sidebar.item>
                 <flux:navlist.item icon="clipboard-document-check" :href="route('gtk.dispositions.index')"
                     :current="request()->routeIs('gtk.dispositions.*')">
                     Disposisi Saya
@@ -66,23 +87,36 @@
                     </flux:navlist.item>
 
 
-                    <flux:sidebar.item icon="building-office-2">
-                        Kelas
+                    <flux:sidebar.item icon="building-office-2" :href="route('admin.classes.index')"
+                        :current="request()->routeIs('admin.classes.*')" wire:navigate>
+                        Kelas & Rombel
                     </flux:sidebar.item>
 
-                    <flux:sidebar.item icon="book-open">
+                    <flux:sidebar.item icon="book-open" :href="route('admin.subjects.index')"
+                        :current="request()->routeIs('admin.subjects.*')" wire:navigate>
                         Mata Pelajaran
+                    </flux:sidebar.item>
+
+                    <flux:sidebar.item icon="building-office" :href="route('admin.rooms.index')"
+                        :current="request()->routeIs('admin.rooms.*')" wire:navigate>
+                        Ruangan
                     </flux:sidebar.item>
 
                     <flux:navlist.item icon="calendar-days" :href="route('admin.schedules.index')"
                         :current="request()->routeIs('admin.schedules.*')" wire:navigate>
-                        Jadwal
+                        Jadwal Pelajaran
                     </flux:navlist.item>
+                    <flux:sidebar.item icon="arrow-trending-up" :href="route('admin.student-progressions.index')"
+                        :current="request()->routeIs('admin.student-progressions.*')" wire:navigate>
+                        Proses Akhir Tahun
+                    </flux:sidebar.item>
+
                 </flux:sidebar.group>
 
 
                 <flux:sidebar.group heading="Presensi" class="grid">
-                    <flux:sidebar.item icon="qr-code">
+                    <flux:sidebar.item icon="qr-code" :href="route('admin.student-attendances.index')"
+                        :current="request()->routeIs('admin.student-attendances.index')" wire:navigate>
                         Presensi Siswa
                     </flux:sidebar.item>
 
@@ -94,14 +128,14 @@
 
 
                 <flux:sidebar.group heading="Persuratan" class="grid">
+                    <flux:navlist.item icon="document-duplicate" :href="route('admin.letter-types.index')"
+                        :current="request()->routeIs('admin.letter-types.*')" wire:navigate>
+                        Jenis Surat
+                    </flux:navlist.item>
                     <flux:navlist.item icon="inbox-arrow-down" :href="route('admin.incoming-letters.index')"
                         :current="request()->routeIs('admin.incoming-letters.*')">
                         Surat Masuk
                     </flux:navlist.item>
-
-                    <flux:sidebar.item icon="paper-airplane">
-                        Disposisi
-                    </flux:sidebar.item>
 
                     <flux:navlist.item icon="paper-airplane" :href="route('admin.outgoing-letters.index')"
                         :current="request()->routeIs('admin.outgoing-letters.*')">
@@ -111,8 +145,16 @@
 
 
                 <flux:sidebar.group heading="Pengaturan" class="grid">
-                    <flux:sidebar.item icon="cog-6-tooth">
+                    <flux:sidebar.item icon="calendar" :href="route('admin.academic-years.index')"
+                        :current="request()->routeIs('admin.academic-years.*')" wire:navigate>Tahun Pelajaran
+                    </flux:sidebar.item>
+                    <flux:sidebar.item icon="cog-6-tooth" :href="route('admin.school-profile.edit')"
+                        :current="request()->routeIs('admin.school-profile.*')" wire:navigate>
                         Profil Madrasah
+                    </flux:sidebar.item>
+                    <flux:sidebar.item icon="clock" :href="route('admin.kbm-times.index')"
+                        :current="request()->routeIs('admin.kbm-times.*')" wire:navigate>
+                        Waktu KBM
                     </flux:sidebar.item>
                     <flux:navlist.item icon="calendar-days" :href="route('admin.holidays.index')"
                         :current="request()->routeIs('admin.holidays.*')">
@@ -129,26 +171,30 @@
             @if(auth()->user()->isHeadmaster())
 
                 <flux:sidebar.group heading="Akademik" class="grid">
-                    <flux:sidebar.item icon="calendar-days">
-                        Jadwal
+                    <flux:sidebar.item icon="clipboard-document-check" :href="route('headmaster.absences.index')"
+                        :current="request()->routeIs('headmaster.absences.*')" wire:navigate>
+                        Approval Absensi GTK
                     </flux:sidebar.item>
 
-                    <flux:sidebar.item icon="chart-bar">
-                        Laporan
+                    <flux:sidebar.item icon="clipboard-document-check" :href="route('headmaster.work-reviews.index')"
+                        :current="request()->routeIs('headmaster.work-reviews.*')" wire:navigate>
+                        Approval LCKH GTK
+                    </flux:sidebar.item>
+                    <flux:sidebar.item icon="book-open" :href="route('headmaster.teaching-journals.index')"
+                        :current="request()->routeIs('headmaster.teaching-journals.*')" wire:navigate>
+                        Rekap Jurnal Mengajar
                     </flux:sidebar.item>
                 </flux:sidebar.group>
 
 
                 <flux:sidebar.group heading="Persuratan" class="grid">
-                    <flux:sidebar.item icon="inbox-arrow-down">
-                        Surat Masuk
+                    <flux:sidebar.item icon="inbox-arrow-down" :href="route('headmaster.incoming-letters.index')"
+                        :current="request()->routeIs('headmaster.incoming-letters.*')" wire:navigate>
+                        Surat Masuk & Disposisi
                     </flux:sidebar.item>
 
-                    <flux:sidebar.item icon="paper-airplane">
-                        Disposisi
-                    </flux:sidebar.item>
-
-                    <flux:sidebar.item icon="document-text">
+                    <flux:sidebar.item icon="document-text" :href="route('headmaster.outgoing-letters.index')"
+                        :current="request()->routeIs('headmaster.outgoing-letters.*')" wire:navigate>
                         Surat Keluar
                     </flux:sidebar.item>
                 </flux:sidebar.group>
@@ -159,16 +205,28 @@
             {{-- ========================= --}}
             {{-- GURU --}}
             {{-- ========================= --}}
-            @if(auth()->user()->isTeacher() || auth()->user()->isHeadmaster())
+            @if(auth()->user()->canTeach())
 
                 <flux:sidebar.group heading="Pembelajaran" class="grid">
-                    <flux:sidebar.item icon="calendar-days">
+                    <flux:sidebar.item icon="book-open" :href="route('gtk.journals.index')"
+                        :current="request()->routeIs('gtk.journals.index')" wire:navigate>
+                        Jurnal Mengajar
+                    </flux:sidebar.item>
+                    <flux:sidebar.item icon="clock" :href="route('gtk.journals.history')"
+                        :current="request()->routeIs('gtk.journals.history')" wire:navigate>
+                        Riwayat Jurnal Mengajar
+                    </flux:sidebar.item>
+                    <flux:sidebar.item icon="calendar-days" :href="route('teacher.schedules.index')"
+                        :current="request()->routeIs('teacher.schedules.*')" wire:navigate>
                         Jadwal Mengajar
                     </flux:sidebar.item>
 
-                    <flux:sidebar.item icon="qr-code">
-                        Presensi Siswa
-                    </flux:sidebar.item>
+                    @if(auth()->user()->canTeach())
+                        <flux:sidebar.item icon="qr-code" :href="route('teacher.student-attendances.index')"
+                            :current="request()->routeIs('teacher.student-attendances.index')" wire:navigate>
+                            Presensi Siswa
+                        </flux:sidebar.item>
+                    @endif
                 </flux:sidebar.group>
             @endif
 
@@ -179,28 +237,41 @@
             @if(auth()->user()->isStaff())
 
                 <flux:sidebar.group heading="Administrasi" class="grid">
-                    <flux:sidebar.item icon="inbox-arrow-down">
+                    <flux:sidebar.item icon="inbox-arrow-down" :href="route('staff.incoming-letters.index')"
+                        :current="request()->routeIs('staff.incoming-letters.*')" wire:navigate>
                         Surat Masuk
                     </flux:sidebar.item>
 
-                    <flux:sidebar.item icon="document-text">
+                    <flux:sidebar.item icon="document-text" :href="route('staff.outgoing-letters.index')"
+                        :current="request()->routeIs('staff.outgoing-letters.*')" wire:navigate>
                         Surat Keluar
                     </flux:sidebar.item>
                 </flux:sidebar.group>
 
 
                 <flux:sidebar.group heading="Presensi" class="grid">
-                    <flux:sidebar.item icon="users">
+                    <flux:sidebar.item icon="users" :href="route('staff.gtk-attendances.index')"
+                        :current="request()->routeIs('staff.gtk-attendances.*')" wire:navigate>
                         Presensi GTK
                     </flux:sidebar.item>
 
-                    <flux:sidebar.item icon="qr-code">
+                    <flux:sidebar.item icon="qr-code" :href="route('staff.student-attendances.index')"
+                        :current="request()->routeIs('staff.student-attendances.index')" wire:navigate>
                         Presensi Siswa
                     </flux:sidebar.item>
                 </flux:sidebar.group>
 
             @endif
 
+            @if(auth()->user()->hasActiveRole(['admin', 'staff', 'teacher', 'headmaster']))
+                <flux:sidebar.group heading="Riwayat" class="grid">
+                    <flux:sidebar.item icon="clipboard-document-list"
+                        :href="route(auth()->user()->activeRole().'.student-attendances.history')"
+                        :current="request()->routeIs('*.student-attendances.history')" wire:navigate>
+                        Riwayat Presensi Siswa
+                    </flux:sidebar.item>
+                </flux:sidebar.group>
+            @endif
         </flux:sidebar.nav>
 
 
@@ -256,6 +327,8 @@
 
                 <flux:menu.separator />
 
+
+                <x-role-switcher />
 
                 <flux:menu.radio.group>
 

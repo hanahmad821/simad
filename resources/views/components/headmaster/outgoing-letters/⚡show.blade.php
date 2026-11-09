@@ -5,10 +5,16 @@ use Illuminate\Support\Facades\Auth;
 use Livewire\Attributes\Title;
 use Livewire\Component;
 use Illuminate\Support\Str;
+use App\Services\ManualOutgoingLetterDocumentService;
+use App\Services\OutgoingLetterDocumentService;
+use App\Services\DocumentConversionService;
+use App\Services\OutgoingLetterPdfService;
+use App\Services\ManualOutgoingLetterPdfService;
+
+
 new
-#[Title('Review Surat Keluar')]
-class extends Component
-{
+    #[Title('Review Surat Keluar')]
+    class extends Component {
     public OutgoingLetter $outgoingLetter;
 
     public bool $showRejectForm = false;
@@ -23,29 +29,19 @@ class extends Component
         ]);
     }
 
-public function approve(): void
-{
-    if ($this->outgoingLetter->status !== 'pending') {
-        return;
+    public function approve(): void
+    {
+        try {
+            app(\App\Services\OutgoingLetterWorkflowService::class)->approve($this->outgoingLetter);
+            $this->outgoingLetter->refresh();
+            $this->dispatch('notify', type: 'success', message: $this->outgoingLetter->usesWetSignature()
+                ? 'Surat disetujui. Silakan cetak dan tanda tangan basah.' : 'Surat berhasil disetujui dan diterbitkan.');
+        } catch (\Throwable $e) {
+            report($e);
+            $this->outgoingLetter->refresh();
+            $this->dispatch('notify', type: 'error', message: 'Surat gagal disetujui: '.$e->getMessage());
+        }
     }
-
-    $this->outgoingLetter->update([
-        'status' => 'issued',
-        'approved_by' => Auth::id(),
-        'approved_at' => now(),
-        'rejection_reason' => null,
-        'verification_token' => $this->outgoingLetter->verification_token
-            ?? Str::random(64),
-    ]);
-
-    $this->outgoingLetter->refresh();
-
-    $this->dispatch(
-        'notify',
-        type: 'success',
-        message: 'Surat berhasil disetujui dan diterbitkan.'
-    );
-}
 
     public function openRejectForm(): void
     {
@@ -55,6 +51,7 @@ public function approve(): void
 
     public function reject(): void
     {
+        $this->outgoingLetter->refresh();
         if ($this->outgoingLetter->status !== 'pending') {
             return;
         }
@@ -103,10 +100,7 @@ public function approve(): void
                 </flux:text>
             </div>
 
-            <flux:button
-                wire:click="back"
-                icon="arrow-left"
-            >
+            <flux:button wire:click="back" icon="arrow-left">
                 Kembali
             </flux:button>
 
@@ -116,19 +110,14 @@ public function approve(): void
         @php
             $statusColor = match ($outgoingLetter->status) {
                 'draft' => 'zinc',
+                'awaiting_signature' => 'yellow',
                 'pending' => 'yellow',
                 'issued' => 'green',
                 'cancelled' => 'red',
                 default => 'zinc',
             };
 
-            $statusLabel = match ($outgoingLetter->status) {
-                'draft' => 'Draft',
-                'pending' => 'Menunggu Persetujuan',
-                'issued' => 'Terbit',
-                'cancelled' => 'Dibatalkan',
-                default => ucfirst($outgoingLetter->status),
-            };
+            $statusLabel = $outgoingLetter->statusLabel();
         @endphp
 
         <flux:card>
@@ -237,7 +226,7 @@ public function approve(): void
         </flux:card>
 
         {{-- Data dinamis --}}
-        @if ($outgoingLetter->letterType?->fields)
+        @if ($outgoingLetter->template_snapshot['fields'] ?? $outgoingLetter->letterType?->fields)
 
             <flux:card>
 
@@ -247,7 +236,7 @@ public function approve(): void
 
                 <div class="mt-5 space-y-5">
 
-                    @foreach ($outgoingLetter->letterType->fields as $field)
+                    @foreach ($outgoingLetter->template_snapshot['fields'] ?? $outgoingLetter->letterType->fields as $field)
 
                         @php
                             $name = $field['name'] ?? '';
@@ -262,7 +251,11 @@ public function approve(): void
                                 {{ $label }}
                             </flux:text>
 
-                            @if ($type === 'repeater' && is_array($value))
+                            @if ($type === 'gtk_assignments')
+                                <x-assignment-recipient-summary :letter="$outgoingLetter" />
+                            @elseif ($type === 'date')
+                                <div class="mt-1 font-medium">{{ $value ? \Carbon\Carbon::parse($value)->locale('id')->translatedFormat('l, d F Y') : '-' }}</div>
+                            @elseif ($type === 'repeater' && is_array($value))
 
                                 <ul class="mt-2 list-disc space-y-1 pl-5">
                                     @foreach ($value as $item)
@@ -298,6 +291,10 @@ public function approve(): void
 
         @endif
 
+        <x-outgoing-letter-attachments :letter="$outgoingLetter" />
+
+        <x-outgoing-letter-document :letter="$outgoingLetter" />
+
         {{-- Isi surat --}}
         @if ($outgoingLetter->isi)
 
@@ -307,8 +304,8 @@ public function approve(): void
                     Isi Surat
                 </flux:heading>
 
-                <div class="mt-4 whitespace-pre-line text-sm leading-7">
-                    {{ $outgoingLetter->isi }}
+                <div class="letter-body mt-4 text-sm leading-7">
+                    {!! app(\App\Services\LetterBodyService::class)->render($outgoingLetter) !!}
                 </div>
 
             </flux:card>
@@ -368,20 +365,12 @@ public function approve(): void
 
                     <div class="flex gap-2">
 
-                        <flux:button
-                            variant="danger"
-                            wire:click="openRejectForm"
-                            icon="arrow-uturn-left"
-                        >
+                        <flux:button variant="danger" wire:click="openRejectForm" icon="arrow-uturn-left">
                             Kembalikan
                         </flux:button>
 
-                        <flux:button
-                            variant="primary"
-                            wire:click="approve"
-                            wire:confirm="Apakah Anda yakin ingin menyetujui surat ini?"
-                            icon="check"
-                        >
+                        <flux:button variant="primary" wire:click="approve"
+                            wire:confirm="Apakah Anda yakin ingin menyetujui surat ini?" icon="check">
                             Setujui
                         </flux:button>
 
@@ -410,26 +399,16 @@ public function approve(): void
                         </flux:text>
                     </div>
 
-                    <flux:textarea
-                        wire:model="rejectionReason"
-                        label="Alasan Pengembalian"
-                        placeholder="Contoh: Perihal surat perlu diperbaiki..."
-                        rows="5"
-                    />
+                    <flux:textarea wire:model="rejectionReason" label="Alasan Pengembalian"
+                        placeholder="Contoh: Perihal surat perlu diperbaiki..." rows="5" />
 
                     <div class="flex justify-end gap-2">
 
-                        <flux:button
-                            type="button"
-                            wire:click="$set('showRejectForm', false)"
-                        >
+                        <flux:button type="button" wire:click="$set('showRejectForm', false)">
                             Batal
                         </flux:button>
 
-                        <flux:button
-                            variant="danger"
-                            wire:click="reject"
-                        >
+                        <flux:button variant="danger" wire:click="reject">
                             Kembalikan Surat
                         </flux:button>
 

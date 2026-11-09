@@ -1,76 +1,41 @@
 <?php
 
 use App\Models\LetterDisposition;
+use App\Services\LetterDispositionService;
 use Illuminate\Support\Facades\Auth;
+use Livewire\Attributes\Locked;
 
 new class extends \Livewire\Component {
+    #[Locked]
     public LetterDisposition $disposition;
-
     public string $notes = '';
 
     public function mount(LetterDisposition $disposition): void
     {
-        // Pastikan disposisi memang milik user yang login
-        abort_unless(
-            $disposition->to_user_id === Auth::id(),
-            403
-        );
-
-        $this->disposition = $disposition->load([
-            'incomingLetter',
-            'fromUser.gtk',
-            'toUser.gtk',
-        ]);
-
-        // Otomatis tandai sudah dibaca
-        if ($this->disposition->status === 'pending') {
-            $this->disposition->update([
-                'status' => 'read',
-                'read_at' => now(),
-            ]);
-
-            $this->disposition->refresh();
-        }
-
+        abort_unless(Auth::check(), 403);
+        app(LetterDispositionService::class)->markRead($disposition, Auth::user());
+        $this->disposition = $disposition->load(['incomingLetter', 'fromUser.gtk', 'toUser.gtk']);
         $this->notes = $this->disposition->notes ?? '';
     }
 
     public function startProcessing(): void
     {
-        $this->disposition->update([
-            'status' => 'in_progress',
-        ]);
-
-        $this->disposition->refresh();
-
-        session()->flash(
-            'success',
-            'Disposisi ditandai sedang diproses.'
-        );
+        abort_unless(Auth::check(), 403);
+        app(LetterDispositionService::class)->start($this->disposition, Auth::user());
+        session()->flash('success', 'Disposisi ditandai sedang diproses.');
     }
 
     public function complete(): void
     {
-        $this->validate([
-            'notes' => ['nullable', 'string', 'max:5000'],
-        ]);
-
-        $this->disposition->update([
-            'status' => 'completed',
-            'completed_at' => now(),
-            'notes' => $this->notes ?: null,
-        ]);
-
-        $this->disposition->refresh();
-
-        session()->flash(
-            'success',
-            'Disposisi berhasil diselesaikan.'
-        );
+        abort_unless(Auth::check(), 403);
+        app(LetterDispositionService::class)->complete($this->disposition, Auth::user(), $this->notes);
+        session()->flash('success', 'Disposisi berhasil diselesaikan.');
     }
 
     public function render()
     {
+        abort_unless($this->disposition->to_user_id === Auth::id(), 403);
+
         return $this->view();
     }
 };
@@ -98,6 +63,11 @@ new class extends \Livewire\Component {
 
         </div>
 
+
+        @if (session()->has('success'))
+            <flux:callout variant="success" icon="check-circle">{{ session('success') }}</flux:callout>
+        @endif
+        @error('status')<flux:callout variant="warning">{{ $message }}</flux:callout>@enderror
 
         {{-- Status --}}
         <flux:card>
@@ -128,11 +98,11 @@ new class extends \Livewire\Component {
                 </div>
 
                 @if ($disposition->status === 'read')
-                    <flux:button wire:click="startProcessing" variant="primary">
+                    <flux:button wire:click="startProcessing" wire:loading.attr="disabled" wire:target="startProcessing" variant="primary">
                         Mulai Diproses
                     </flux:button>
                 @elseif ($disposition->status === 'in_progress')
-                    <flux:button wire:click="complete" variant="primary">
+                    <flux:button wire:click="complete" wire:loading.attr="disabled" wire:target="complete" variant="primary">
                         Tandai Selesai
                     </flux:button>
                 @endif
@@ -261,12 +231,12 @@ new class extends \Livewire\Component {
                     Catatan Penyelesaian
                 </flux:heading>
 
-                <flux:textarea wire:model="notes" class="mt-4" placeholder="Tuliskan catatan hasil tindak lanjut..."
+                <flux:textarea wire:model="notes" label="Catatan hasil tindak lanjut" class="mt-4" placeholder="Tuliskan catatan hasil tindak lanjut..."
                     rows="5" :disabled="$disposition->status === 'completed'" />
 
                 @if ($disposition->status === 'in_progress')
                     <div class="mt-4 flex justify-end">
-                        <flux:button wire:click="complete" variant="primary">
+                        <flux:button wire:click="complete" wire:loading.attr="disabled" wire:target="complete" variant="primary">
                             Tandai Selesai
                         </flux:button>
                     </div>

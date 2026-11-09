@@ -5,8 +5,10 @@ use App\Models\LessonPeriod;
 use App\Models\Room;
 use App\Models\Schedule;
 use App\Models\SchoolClass;
-use App\Models\Semester;
 use App\Models\TeachingAssignment;
+use App\Services\ScheduleSessionService;
+use Illuminate\Validation\ValidationException;
+use Livewire\Attributes\Locked;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Livewire\Component;
@@ -19,8 +21,9 @@ new class extends Component
     |--------------------------------------------------------------------------
     */
 
+    #[Locked]
+    public ?int $schoolClassId = null;
     public ?int $academicYearId = null;
-    public ?int $semesterId = null;
 
     /*
     |--------------------------------------------------------------------------
@@ -29,10 +32,12 @@ new class extends Component
     */
 
     public bool $showForm = false;
+    #[Locked]
     public ?int $editingScheduleId = null;
 
     public ?int $teachingAssignmentId = null;
     public ?int $lessonPeriodId = null;
+    public ?int $duration = 1;
     public ?int $roomId = null;
     public ?int $dayOfWeek = null;
     public bool $isActive = true;
@@ -43,15 +48,20 @@ new class extends Component
     |--------------------------------------------------------------------------
     */
 
-    public function mount(): void
+    public function mount(?int $schoolClassId = null, ?int $initialAcademicYearId = null): void
     {
+        abort_unless(auth()->user()->isAdmin(), 403);
+        $schoolClassId ??= request()->integer('school_class_id') ?: null;
+        $initialAcademicYearId ??= request()->integer('academic_year_id') ?: null;
+        $this->schoolClassId = $schoolClassId;
+        if ($schoolClassId) SchoolClass::findOrFail($schoolClassId);
         $this->academicYearId = AcademicYear::query()
             ->where('is_active', true)
             ->value('id');
 
-        $this->semesterId = Semester::query()
-            ->where('is_active', true)
-            ->value('id');
+        if ($initialAcademicYearId) {
+            $this->academicYearId = AcademicYear::findOrFail($initialAcademicYearId)->id;
+        }
     }
 
     /*
@@ -67,17 +77,16 @@ new class extends Component
             ->get();
     }
 
-    public function getSemestersProperty(): Collection
+    public function updatedAcademicYearId(): void
     {
-        return Semester::query()
-            ->orderBy('id')
-            ->get();
+        $this->schoolClassId = null;
+        $this->closeForm();
     }
 
     public function getSchoolClassesProperty(): Collection
     {
-        return SchoolClass::query()
-            ->where('is_active', true)
+        return SchoolClass::query()->where('academic_year_id', $this->academicYearId)
+            ->when($this->schoolClassId, fn ($q) => $q->whereKey($this->schoolClassId), fn ($q) => $q->where('is_active', true))
             ->orderBy('name')
             ->get();
     }
@@ -94,29 +103,30 @@ new class extends Component
     {
         return LessonPeriod::query()
             ->where('is_active', true)
-            ->orderBy('sort_order')
+            ->orderBy('start_time')->orderBy('period_number')
             ->get();
     }
 
     public function getTeachingAssignmentsProperty(): Collection
     {
-        if (! $this->academicYearId || ! $this->semesterId) {
+        if (! $this->academicYearId) {
             return collect();
         }
 
         return TeachingAssignment::query()
+        ->withCount('activeSchedules as scheduled_hours')
         ->with([
             'gtk',
             'subject',
             'schoolClass',
         ])
         ->where('academic_year_id', $this->academicYearId)
-        ->where('semester_id', $this->semesterId)
         ->when(
             $this->selectedSchoolClassId,
             fn (Builder $query) =>
                 $query->where('school_class_id', $this->selectedSchoolClassId)
         )
+        ->when($this->schoolClassId, fn ($q) => $q->where('school_class_id', $this->schoolClassId))
         ->where('is_active', true)
         ->orderBy('school_class_id')
         ->orderBy('subject_id')
@@ -131,7 +141,7 @@ new class extends Component
 
     public function getSchedulesProperty(): Collection
     {
-        if (! $this->academicYearId || ! $this->semesterId) {
+        if (! $this->academicYearId) {
             return collect();
         }
 
@@ -144,12 +154,14 @@ new class extends Component
                 'room',
             ])
             ->where('is_active', true)
+            ->whereHas('lessonPeriod', fn ($query) => $query->where('is_active', true))
             ->whereHas('teachingAssignment', function (Builder $query) {
                 $query
+                    ->when($this->schoolClassId, fn ($q) => $q->where('school_class_id', $this->schoolClassId))
                     ->where('academic_year_id', $this->academicYearId)
-                    ->where('semester_id', $this->semesterId);
+                    ->where('is_active', true);
             })
-            ->get();
+            ->get()->filter(fn ($schedule) => $this->periodsForDay($schedule->day_of_week)->contains('id', $schedule->lesson_period_id));
     }
 
     /**
@@ -199,28 +211,7 @@ new class extends Component
 
     public function periodsForDay(int $dayOfWeek): Collection
     {
-        $periods = $this->lessonPeriods;
-
-        // Senin-Kamis dan Sabtu menggunakan seluruh jadwal.
-        if ($dayOfWeek !== 5) {
-            return $periods;
-        }
-
-        /*
-         * Jumat hanya sampai JP 5.
-         *
-         * Kita cari sort_order JP 5 agar slot waktu sebelumnya,
-         * termasuk Istirahat 1, tetap ikut tampil.
-         */
-        $jp5 = $periods->firstWhere('period_number', 5);
-
-        if (! $jp5) {
-            return $periods;
-        }
-
-        return $periods
-            ->where('sort_order', '<=', $jp5->sort_order)
-            ->values();
+        return app(ScheduleSessionService::class)->periodsForDay($dayOfWeek, $this->lessonPeriods);
     }
 
     /*
@@ -238,260 +229,99 @@ new class extends Component
 
         $this->dayOfWeek = $dayOfWeek;
         $this->lessonPeriodId = $lessonPeriodId;
-        $this->selectedSchoolClassId = $schoolClassId;
+        $this->selectedSchoolClassId = $this->schoolClassId ?? $schoolClassId;
+        $this->useClassroom($this->selectedSchoolClassId);
 
         $this->showForm = true;
+    }
+
+    public function updatedTeachingAssignmentId(): void
+    {
+        $assignment = $this->teachingAssignments->firstWhere('id', $this->teachingAssignmentId);
+        $this->useClassroom($assignment?->school_class_id);
+    }
+
+    public function updatedDayOfWeek(): void
+    {
+        $current = $this->lessonPeriodId ? LessonPeriod::find($this->lessonPeriodId) : null;
+        $replacement = $current && $this->dayOfWeek ? $this->periodsForDay($this->dayOfWeek)
+            ->first(fn ($period) => ! $period->is_break && $period->period_number > 0 && $period->period_number === $current->period_number) : null;
+        $this->lessonPeriodId = $replacement?->id;
+    }
+
+    private function useClassroom(?int $classId): void
+    {
+        $room = $classId ? SchoolClass::find($classId)?->room : null;
+        $this->roomId = $room?->is_active ? $room->id : null;
     }
 
     public function editSchedule(int $scheduleId): void
     {
-        $schedule = Schedule::query()->findOrFail($scheduleId);
-
+        $this->resetForm();
+        $this->assertClassSchedule($scheduleId);
+        $session = app(ScheduleSessionService::class)->sessionFor($scheduleId);
+        $schedule = $session->schedules->first();
         $this->editingScheduleId = $schedule->id;
         $this->teachingAssignmentId = $schedule->teaching_assignment_id;
+        $this->selectedSchoolClassId = $schedule->teachingAssignment->school_class_id;
         $this->lessonPeriodId = $schedule->lesson_period_id;
+        $this->duration = $session->schedules->count();
         $this->roomId = $schedule->room_id;
         $this->dayOfWeek = $schedule->day_of_week;
         $this->isActive = $schedule->is_active;
-
-        $this->resetValidation();
-
         $this->showForm = true;
+    }
+
+    public function getSessionPreviewProperty(): array
+    {
+        if (! $this->lessonPeriodId || ! $this->dayOfWeek) {
+            return ['periods' => collect(), 'error' => null];
+        }
+        if ($this->duration === null) {
+            return ['periods' => collect(), 'error' => 'Isi durasi sesi dalam JP.'];
+        }
+        try {
+            return ['periods' => app(ScheduleSessionService::class)->periodSpan($this->lessonPeriodId, $this->duration, $this->dayOfWeek), 'error' => null];
+        } catch (ValidationException $exception) {
+            return ['periods' => collect(), 'error' => collect($exception->errors())->flatten()->first()];
+        }
+    }
+
+    public function getScheduleSessionMapProperty(): Collection
+    {
+        $map = collect();
+        foreach (app(ScheduleSessionService::class)->group($this->schedules) as $session) {
+            foreach ($session->schedules as $schedule) {
+                $map->put($schedule->id, $session);
+            }
+        }
+        return $map;
     }
 
     public function saveSchedule(): void
     {
-        $validated = $this->validate([
-            'teachingAssignmentId' => ['required', 'integer', 'exists:teaching_assignments,id'],
-            'lessonPeriodId' => ['required', 'integer', 'exists:lesson_periods,id'],
-            'roomId' => ['required', 'integer', 'exists:rooms,id'],
-            'dayOfWeek' => ['required', 'integer', 'in:1,2,3,4,5,6'],
-            'isActive' => ['boolean'],
-        ]);
-
-        $assignment = TeachingAssignment::query()
-            ->with([
-                'gtk',
-                'subject',
-                'schoolClass',
-            ])
-            ->findOrFail($validated['teachingAssignmentId']);
-
-        $lessonPeriod = LessonPeriod::query()
-            ->findOrFail($validated['lessonPeriodId']);
-
-        /*
-         * Jangan izinkan Kegiatan Pagi / Istirahat menjadi jadwal KBM.
-         */
-        if ($lessonPeriod->is_break || $lessonPeriod->period_number === 0) {
-            $this->addError(
-                'lessonPeriodId',
-                'Slot ini bukan jam pelajaran yang dapat digunakan untuk jadwal KBM.'
-            );
-
-            return;
+        if ($this->schoolClassId) {
+            abort_unless(TeachingAssignment::whereKey($this->teachingAssignmentId)->where('school_class_id', $this->schoolClassId)->exists(), 422);
         }
-
-        /*
-         * Pastikan assignment sesuai dengan tahun pelajaran
-         * dan semester yang sedang dipilih.
-         */
-        if (
-            $assignment->academic_year_id !== $this->academicYearId
-            || $assignment->semester_id !== $this->semesterId
-        ) {
-            $this->addError(
-                'teachingAssignmentId',
-                'Mata pelajaran tersebut tidak sesuai dengan tahun pelajaran dan semester yang dipilih.'
-            );
-
-            return;
-        }
-
-        /*
-         * Jumat hanya sampai JP 5.
-         */
-        if (
-            $validated['dayOfWeek'] === 5
-            && $lessonPeriod->period_number > 5
-        ) {
-            $this->addError(
-                'lessonPeriodId',
-                'Hari Jumat hanya sampai JP 5.'
-            );
-
-            return;
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Cek jumlah JP guru
-        |--------------------------------------------------------------------------
-        */
-
-        $currentSchedule = $this->editingScheduleId
-            ? Schedule::query()->find($this->editingScheduleId)
-            : null;
-
-        $teachingHourCount = Schedule::query()
-            ->where('is_active', true)
-            ->where('teaching_assignment_id', $assignment->id)
-            ->when(
-                $this->editingScheduleId,
-                fn (Builder $query) =>
-                    $query->where('id', '!=', $this->editingScheduleId)
-            )
-            ->count();
-
-        if (
-            $teachingHourCount >= $assignment->teaching_hours
-            && (
-                ! $currentSchedule
-                || ! $currentSchedule->is_active
-                || ! $this->isActive
-            )
-        ) {
-            // Tidak perlu blokir apabila hanya edit jadwal yang sama.
-        } elseif (
-            $teachingHourCount >= $assignment->teaching_hours
-            && $this->isActive
-        ) {
-            $this->addError(
-                'teachingAssignmentId',
-                "Guru tersebut sudah memiliki {$assignment->teaching_hours} JP untuk mata pelajaran ini."
-            );
-
-            return;
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Cek bentrok GURU
-        |--------------------------------------------------------------------------
-        */
-
-        $teacherConflict = Schedule::query()
-            ->where('day_of_week', $validated['dayOfWeek'])
-            ->where('lesson_period_id', $validated['lessonPeriodId'])
-            ->where('is_active', true)
-            ->when(
-                $this->editingScheduleId,
-                fn (Builder $query) =>
-                    $query->where('id', '!=', $this->editingScheduleId)
-            )
-            ->whereHas('teachingAssignment', function (Builder $query) use ($assignment) {
-                $query
-                    ->where('gtk_id', $assignment->gtk_id)
-                    ->where('academic_year_id', $assignment->academic_year_id)
-                    ->where('semester_id', $assignment->semester_id);
-            })
-            ->exists();
-
-        if ($teacherConflict && $this->isActive) {
-            $this->addError(
-                'lessonPeriodId',
-                'Guru tersebut sudah memiliki jadwal pada hari dan jam tersebut.'
-            );
-
-            return;
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Cek bentrok KELAS
-        |--------------------------------------------------------------------------
-        */
-
-        $classConflict = Schedule::query()
-            ->where('day_of_week', $validated['dayOfWeek'])
-            ->where('lesson_period_id', $validated['lessonPeriodId'])
-            ->where('is_active', true)
-            ->when(
-                $this->editingScheduleId,
-                fn (Builder $query) =>
-                    $query->where('id', '!=', $this->editingScheduleId)
-            )
-            ->whereHas('teachingAssignment', function (Builder $query) use ($assignment) {
-                $query
-                    ->where('school_class_id', $assignment->school_class_id)
-                    ->where('academic_year_id', $assignment->academic_year_id)
-                    ->where('semester_id', $assignment->semester_id);
-            })
-            ->exists();
-
-        if ($classConflict && $this->isActive) {
-            $this->addError(
-                'lessonPeriodId',
-                'Kelas tersebut sudah memiliki jadwal pada hari dan jam tersebut.'
-            );
-
-            return;
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Cek bentrok RUANG
-        |--------------------------------------------------------------------------
-        */
-
-        $roomConflict = Schedule::query()
-            ->where('day_of_week', $validated['dayOfWeek'])
-            ->where('lesson_period_id', $validated['lessonPeriodId'])
-            ->where('room_id', $validated['roomId'])
-            ->where('is_active', true)
-            ->when(
-                $this->editingScheduleId,
-                fn (Builder $query) =>
-                    $query->where('id', '!=', $this->editingScheduleId)
-            )
-            ->exists();
-
-        if ($roomConflict && $this->isActive) {
-            $this->addError(
-                'roomId',
-                'Ruangan tersebut sudah digunakan pada hari dan jam tersebut.'
-            );
-
-            return;
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Simpan
-        |--------------------------------------------------------------------------
-        */
-
-        Schedule::query()->updateOrCreate(
-            [
-                'id' => $this->editingScheduleId,
-            ],
-            [
-                'teaching_assignment_id' => $assignment->id,
-                'lesson_period_id' => $validated['lessonPeriodId'],
-                'room_id' => $validated['roomId'],
-                'day_of_week' => $validated['dayOfWeek'],
-                'is_active' => $this->isActive,
-            ]
-        );
-
+        $editing = $this->editingScheduleId !== null;
+        app(ScheduleSessionService::class)->save(auth()->user(), $this->only([
+            'academicYearId', 'teachingAssignmentId', 'lessonPeriodId', 'duration', 'roomId', 'dayOfWeek', 'isActive',
+        ]), $this->editingScheduleId);
         $this->showForm = false;
         $this->resetForm();
-
-        session()->flash(
-            'success',
-            $this->editingScheduleId
-                ? 'Jadwal berhasil diperbarui.'
-                : 'Jadwal berhasil ditambahkan.'
-        );
+        session()->flash('success', $editing ? 'Sesi jadwal berhasil diperbarui.' : 'Sesi jadwal berhasil ditambahkan.');
     }
 
     public function deleteSchedule(int $scheduleId): void
     {
-        Schedule::query()
-            ->findOrFail($scheduleId)
-            ->delete();
+        $this->assertClassSchedule($scheduleId);
+        app(ScheduleSessionService::class)->delete(auth()->user(), $scheduleId);
+        session()->flash('success', 'Sesi jadwal berhasil dihapus.');
+    }
 
-        session()->flash('success', 'Jadwal berhasil dihapus.');
+    private function assertClassSchedule(int $id): void
+    {
+        if ($this->schoolClassId) abort_unless(Schedule::whereKey($id)->whereHas('teachingAssignment', fn ($q) => $q->where('school_class_id', $this->schoolClassId))->exists(), 404);
     }
 
     public function closeForm(): void
@@ -506,9 +336,10 @@ new class extends Component
         $this->editingScheduleId = null;
         $this->teachingAssignmentId = null;
         $this->lessonPeriodId = null;
+        $this->duration = 1;
         $this->roomId = null;
         $this->dayOfWeek = null;
-        $this->selectedSchoolClassId = null;
+        $this->selectedSchoolClassId = $this->schoolClassId;
         $this->isActive = true;
 
         $this->resetValidation();
@@ -530,24 +361,36 @@ new class extends Component
 <div class="space-y-6">
 
     {{-- Header --}}
-    <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+    <div class="space-y-4">
         <div>
             <flux:heading size="xl">
-                Jadwal Madrasah
+                {{ $schoolClassId ? 'Jadwal Pelajaran Kelas' : 'Jadwal Madrasah' }}
             </flux:heading>
 
             <flux:text class="mt-1">
-                Menampilkan seluruh jadwal kegiatan pembelajaran berdasarkan kelas.
+                Kelola jadwal per sesi. 1 JP = 35 menit; jam kegiatan pagi dan istirahat mengikuti pola setiap hari.
             </flux:text>
         </div>
 
-        <flux:button
-            variant="primary"
-            icon="plus"
-            wire:click="createSchedule"
-        >
-            Tambah Jadwal
-        </flux:button>
+        <div class="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap sm:items-center" role="group" aria-label="Pengelolaan jadwal">
+            <flux:button
+                variant="primary"
+                icon="plus"
+                wire:click="createSchedule"
+            >
+                Tambah Jadwal
+            </flux:button>
+            <flux:button
+                icon="user-group"
+                :href="route('admin.schedules.assignments', ['academic_year_id' => $academicYearId, 'class_id' => $schoolClassId])"
+                wire:navigate
+            >
+                Kelola Pengampu
+            </flux:button>
+            <flux:button :href="route('admin.kbm-times.index')" icon="clock" wire:navigate>
+                Pengaturan Waktu KBM
+            </flux:button>
+        </div>
     </div>
 
     {{-- Flash --}}
@@ -561,6 +404,9 @@ new class extends Component
     @endif
 
     {{-- Filter --}}
+    @error('schedule')
+        <flux:callout variant="warning">{{ $message }}</flux:callout>
+    @enderror
     <flux:card class="p-4">
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
 
@@ -577,23 +423,10 @@ new class extends Component
                 @endforeach
             </flux:select>
 
-            <flux:select
-                label="Semester"
-                wire:model.live="semesterId"
-            >
-                <option value="">Pilih Semester</option>
-
-                @foreach ($this->semesters as $semester)
-                    <option value="{{ $semester->id }}">
-                        {{ $semester->name }}
-                    </option>
-                @endforeach
-            </flux:select>
-
         </div>
     </flux:card>
 
-    @if (! $academicYearId || ! $semesterId)
+    @if (! $academicYearId)
 
         <flux:card class="p-8 text-center">
             <flux:icon
@@ -602,7 +435,7 @@ new class extends Component
             />
 
             <flux:heading size="lg" class="mt-4">
-                Pilih Tahun Pelajaran dan Semester
+                Pilih Tahun Pelajaran
             </flux:heading>
 
             <flux:text class="mt-2">
@@ -616,11 +449,11 @@ new class extends Component
         <div class="flex items-center justify-between">
             <div>
                 <flux:heading size="lg">
-                    Jadwal Seluruh Madrasah
+                    {{ $schoolClassId ? 'Jadwal Kelas' : 'Jadwal Seluruh Madrasah' }}
                 </flux:heading>
 
                 <flux:text class="mt-1">
-                    Setiap kolom menunjukkan satu kelas.
+                    Setiap kolom menunjukkan satu kelas. Sesi beberapa JP ditampilkan dalam satu blok.
                 </flux:text>
             </div>
 
@@ -789,7 +622,7 @@ new class extends Component
                                                         @if ($period->period_number === 0)
                                                             Kegiatan Pagi
                                                         @else
-                                                            JP {{ $period->period_number }}
+                                                            {{ $period->name }}
                                                         @endif
                                                     </div>
 
@@ -812,7 +645,14 @@ new class extends Component
                                                         );
                                                     @endphp
 
-                                                    <td class="border-b border-r border-zinc-200 p-2 align-top dark:border-zinc-700">
+                                                    @php
+                                                        $scheduleSession = $schedule ? $this->scheduleSessionMap->get($schedule->id) : null;
+                                                        $scheduleSegment = $scheduleSession?->segments->first(fn ($segment) => $segment->schedules->contains('id', $schedule->id));
+                                                    @endphp
+                                                    @if ($scheduleSegment && $scheduleSegment->id !== $schedule->id)
+                                                        @continue
+                                                    @endif
+                                                    <td rowspan="{{ $scheduleSegment?->schedules->count() ?? 1 }}" class="border-b border-r border-zinc-200 p-2 align-top dark:border-zinc-700">
 
                                                         @if ($schedule)
 
@@ -822,6 +662,11 @@ new class extends Component
                                                                 <div class="font-semibold leading-tight">
                                                                     {{ $schedule->teachingAssignment->subject->name }}
                                                                 </div>
+                                                                <flux:badge class="mt-2" size="sm" color="blue">{{ $scheduleSession->schedules->count() }} JP</flux:badge>
+                                                                @if ($scheduleSession->id !== $schedule->id)
+                                                                    <div class="mt-1 text-xs font-semibold text-blue-600">Lanjutan setelah istirahat</div>
+                                                                @endif
+                                                                <div class="mt-1 text-xs text-zinc-500">{{ $scheduleSession->lesson_periods->first()->name }}@if($scheduleSession->schedules->count() > 1) – {{ $scheduleSession->lesson_periods->last()->name }}@endif</div>
 
                                                                 {{-- Guru --}}
                                                                 <div class="mt-2 flex items-start gap-1.5 text-xs text-zinc-600 dark:text-zinc-300">
@@ -868,7 +713,7 @@ new class extends Component
         icon="trash"
         class="text-red-600 hover:text-red-700"
         wire:click="deleteSchedule({{ $schedule->id }})"
-        wire:confirm="Yakin ingin menghapus jadwal ini?"
+        wire:confirm="Hapus seluruh jam pelajaran dalam sesi ini?"
         title="Hapus"
     />
 
@@ -876,7 +721,7 @@ new class extends Component
 
                                                             </div>
 
-                                                        @else
+                                                        @elseif ($period->period_number > 0)
 
                                                             {{-- Slot kosong --}}
                                                             <button
@@ -939,7 +784,7 @@ new class extends Component
                 </flux:heading>
 
                 <flux:text class="mt-1">
-                    Tentukan guru, mata pelajaran, kelas, hari, jam, dan ruang.
+                    Pilih jam mulai dan durasi sesi, misalnya 2 JP untuk satu pelajaran dua jam.
                 </flux:text>
             </div>
 
@@ -948,7 +793,7 @@ new class extends Component
                 {{-- Teaching Assignment --}}
                 <flux:select
                     label="Mata Pelajaran / Guru / Kelas"
-                    wire:model="teachingAssignmentId"
+                    wire:model.live="teachingAssignmentId"
                     searchable
                 >
 
@@ -971,7 +816,7 @@ new class extends Component
                                 <option value="{{ $assignment->id }}">
                                     {{ $assignment->subject->name }}
                                     — {{ $assignment->gtk->full_name }}
-                                    ({{ $assignment->teaching_hours }} JP)
+                                    ({{ $assignment->scheduled_hours }} JP terjadwal)
                                 </option>
 
                             @endforeach
@@ -992,7 +837,7 @@ new class extends Component
                 {{-- Hari --}}
                 <flux:select
                     label="Hari"
-                    wire:model="dayOfWeek"
+                    wire:model.live="dayOfWeek"
                 >
 
                     <option value="">
@@ -1010,20 +855,20 @@ new class extends Component
 
                 {{-- Jam --}}
                 <flux:select
-                    label="Jam Pelajaran"
-                    wire:model="lessonPeriodId"
+                    label="Jam mulai"
+                    wire:model.live="lessonPeriodId"
                 >
 
                     <option value="">
-                        Pilih jam
+                        {{ $dayOfWeek ? 'Pilih jam' : 'Pilih hari terlebih dahulu' }}
                     </option>
 
-                    @foreach ($this->lessonPeriods as $period)
+                    @foreach (($this->dayOfWeek ? $this->periodsForDay($this->dayOfWeek) : collect()) as $period)
 
                         @if (! $period->is_break && $period->period_number !== 0)
 
                             <option value="{{ $period->id }}">
-                                JP {{ $period->period_number }}
+                                {{ $period->name }}
                                 —
                                 {{ \Carbon\Carbon::parse($period->start_time)->format('H:i') }}
                                 -
@@ -1040,6 +885,31 @@ new class extends Component
                     <flux:text class="text-sm text-red-600">
                         {{ $message }}
                     </flux:text>
+                @enderror
+
+                <flux:input type="number" label="Durasi sesi (JP)" min="1" max="12" step="1" wire:model.live="duration" />
+                @error('duration')
+                    <flux:text class="text-sm text-red-600">{{ $message }}</flux:text>
+                @enderror
+                @php
+                    $preview = $this->sessionPreview;
+                @endphp
+                @if ($preview['error'])
+                    <flux:callout variant="warning">{{ $preview['error'] }}</flux:callout>
+                @elseif ($preview['periods']->isNotEmpty())
+                    <flux:callout icon="clock">
+                        <div class="font-semibold">{{ $duration }} JP · {{ $preview['periods']->first()->name }}@if($duration > 1) – {{ $preview['periods']->last()->name }}@endif</div>
+                        <div>{{ substr($preview['periods']->first()->start_time, 0, 5) }} – {{ substr($preview['periods']->last()->end_time, 0, 5) }} · Presensi siswa cukup sekali untuk sesi ini.</div>
+                        @foreach ($this->periodsForDay($dayOfWeek)->where('is_break', true) as $break)
+                            @if ($break->start_time >= $preview['periods']->first()->end_time && $break->end_time <= $preview['periods']->last()->start_time)
+                                <div>Jeda {{ strtolower($break->name) }}: {{ substr($break->start_time, 0, 5) }} – {{ substr($break->end_time, 0, 5) }}. Pelajaran dilanjutkan setelahnya.</div>
+                            @endif
+                        @endforeach
+                    </flux:callout>
+                @endif
+                <flux:text size="sm">1 JP = 35 menit. Sesi boleh berlanjut setelah istirahat; waktu istirahat tidak dihitung sebagai JP.</flux:text>
+                @error('schedule')
+                    <flux:callout variant="warning">{{ $message }}</flux:callout>
                 @enderror
 
 
@@ -1071,6 +941,7 @@ new class extends Component
                         {{ $message }}
                     </flux:text>
                 @enderror
+                <flux:text size="sm">Ruang mengikuti pengaturan kelas dan dapat diganti untuk sesi ini. Jika belum terisi, tentukan ruang kelas melalui menu Kelas atau pilih ruangan di sini.</flux:text>
 
 
                 {{-- Status --}}

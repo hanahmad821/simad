@@ -6,7 +6,10 @@ namespace App\Models;
 use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Illuminate\Support\Carbon;
@@ -14,8 +17,7 @@ use Illuminate\Support\Str;
 use Laravel\Fortify\Contracts\PasskeyUser;
 use Laravel\Fortify\PasskeyAuthenticatable;
 use Laravel\Fortify\TwoFactorAuthenticatable;
-use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
 /**
  * @property int $id
  * @property string $name
@@ -27,16 +29,26 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property Carbon|null $two_factor_confirmed_at
  * @property string|null $remember_token
  * @property string $role
+ * @property string|null $secondary_role
  * @property int|null $gtk_id
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  */
-#[Fillable(['name', 'email', 'password', 'role', 'gtk_id'])]
+#[Fillable(['name', 'email', 'password', 'role', 'secondary_role', 'gtk_id'])]
 #[Hidden(['password', 'two_factor_secret', 'two_factor_recovery_codes', 'remember_token'])]
 class User extends Authenticatable implements PasskeyUser
 {
+    public const ROLE_LABELS = [
+        'admin' => 'Admin',
+        'headmaster' => 'Kepala Madrasah',
+        'teacher' => 'Guru',
+        'staff' => 'Staf TU',
+    ];
+
     /** @use HasFactory<UserFactory> */
     use HasFactory, Notifiable, PasskeyAuthenticatable, TwoFactorAuthenticatable;
+
+    protected $attributes = ['role' => 'staff'];
 
     /**
      * Get the attributes that should be cast.
@@ -63,6 +75,7 @@ class User extends Authenticatable implements PasskeyUser
             : $initials;
     }
 
+    /** @return HasMany<StudentAttendance, $this> */
     public function recordedStudentAttendances(): HasMany
     {
         return $this->hasMany(
@@ -70,30 +83,86 @@ class User extends Authenticatable implements PasskeyUser
             'recorded_by'
         );
     }
+
+    /** @return BelongsTo<Gtk, $this> */
     public function gtk(): BelongsTo
     {
         return $this->belongsTo(Gtk::class);
     }
+
+    /** @return list<string> */
+    public function roleNames(): array
+    {
+        return array_values(array_unique(array_filter([$this->role, $this->secondary_role],
+            fn ($role) => isset(self::ROLE_LABELS[$role]))));
+    }
+
+    /** @param string|list<string> $roles */
+    public function hasRole(string|array $roles): bool
+    {
+        return array_intersect($this->roleNames(), (array) $roles) !== [];
+    }
+
+    public function activeRole(): string
+    {
+        if (auth()->id() === $this->id) {
+            $context = session('active_role');
+            if (is_array($context) && ($context['user_id'] ?? null) === $this->id
+                && is_string($context['role'] ?? null) && $this->hasRole($context['role'])) {
+                return $context['role'];
+            }
+        }
+
+        return $this->role;
+    }
+
+    /** @param string|list<string> $roles */
+    public function hasActiveRole(string|array $roles): bool
+    {
+        return in_array($this->activeRole(), (array) $roles, true);
+    }
+
+    /**
+     * @param  Builder<User>  $query
+     * @param  list<string>  $roles
+     * @return Builder<User>
+     */
+    public function scopeWithRoles(Builder $query, array $roles): Builder
+    {
+        return $query->where(fn (Builder $query) => $query->whereIn('role', $roles)->orWhereIn('secondary_role', $roles));
+    }
+
     public function isAdmin(): bool
     {
-        return $this->role === 'admin';
+        return $this->hasActiveRole('admin');
+    }
+
+    public function canManageLetters(): bool
+    {
+        return $this->hasActiveRole(['admin', 'staff']);
     }
 
     public function isHeadmaster(): bool
     {
-        return $this->role === 'headmaster';
+        return $this->hasActiveRole('headmaster');
     }
 
     public function isTeacher(): bool
     {
-        return $this->role === 'teacher';
+        return $this->hasActiveRole('teacher');
+    }
+
+    public function canTeach(): bool
+    {
+        return $this->hasActiveRole(['teacher', 'headmaster']);
     }
 
     public function isStaff(): bool
     {
-        return $this->role === 'staff';
+        return $this->hasActiveRole('staff');
     }
 
+    /** @return HasMany<LetterDisposition, $this> */
     public function sentDispositions(): HasMany
     {
         return $this->hasMany(
@@ -102,6 +171,7 @@ class User extends Authenticatable implements PasskeyUser
         );
     }
 
+    /** @return HasMany<LetterDisposition, $this> */
     public function receivedDispositions(): HasMany
     {
         return $this->hasMany(
@@ -110,6 +180,7 @@ class User extends Authenticatable implements PasskeyUser
         );
     }
 
+    /** @return HasMany<OutgoingLetter, $this> */
     public function outgoingLetters(): HasMany
     {
         return $this->hasMany(

@@ -14,14 +14,13 @@ return new class extends Migration
         Schema::create('outgoing_letters', function (Blueprint $table) {
             $table->id();
 
-            $table->foreignId('letter_type_id')
-                ->constrained('letter_types')
-                ->restrictOnDelete();
+            // The foreign key is attached after letter_types exists.
+            $table->unsignedBigInteger('letter_type_id')->nullable();
 
             // Nomor urut global dalam satu tahun
-            $table->unsignedInteger('nomor_urut');
+            $table->unsignedInteger('nomor_urut')->nullable();
 
-            $table->unsignedSmallInteger('nomor_tahun');
+            $table->unsignedSmallInteger('nomor_tahun')->nullable();
 
             // Contoh: A.001/LPM/33-23/MA-03/IX/2026
             $table->string('nomor_surat')->unique();

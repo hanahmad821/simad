@@ -41,7 +41,7 @@ new class extends Component {
             return [
                 'date' => $date->format('Y-m-d'),
                 'day' => $date->day,
-                'day_name' => $date->translatedFormat('D'),
+                'day_name' => $date->locale('id')->translatedFormat('l'),
                 'is_today' => $date->isToday(),
                 'is_sunday' => $date->isSunday(),
             ];
@@ -76,6 +76,13 @@ new class extends Component {
             ->keyBy(fn($attendance) => $attendance->attendance_date->format('Y-m-d'));
     }
 
+    public function getMonthlyClassificationsProperty()
+    {
+        if (! Auth::user()->gtk_id) return collect();
+        return app(\App\Services\GtkAttendancePolicyService::class)->monthRows(Auth::user()->gtk_id, today())
+            ->keyBy('date')->map(fn ($row) => $row['classification']);
+    }
+
     public function checkIn(
         float $latitude,
         float $longitude,
@@ -103,6 +110,20 @@ new class extends Component {
     }
 
     private function saveAttendance(
+        string $type,
+        float $latitude,
+        float $longitude,
+        float $accuracy
+    ): void {
+        $this->locationMessage = '';
+        $this->errorMessage = '';
+        \Illuminate\Support\Facades\DB::transaction(function () use ($type, $latitude, $longitude, $accuracy) {
+            \App\Models\Gtk::whereKey(Auth::user()->gtk_id)->lockForUpdate()->first();
+            $this->persistAttendance($type, $latitude, $longitude, $accuracy);
+        });
+    }
+
+    private function persistAttendance(
         string $type,
         float $latitude,
         float $longitude,
@@ -152,6 +173,11 @@ new class extends Component {
             'attendance_date' => today(),
         ]);
 
+        if ($attendance->gtk_absence_request_id) {
+            $this->errorMessage = 'Ketidakhadiran hari ini sudah disetujui kepala madrasah. Presensi GPS tidak dapat menimpa absensi.';
+            return;
+        }
+
         if ($type === 'check_in') {
 
             if ($attendance->check_in_at) {
@@ -184,6 +210,12 @@ new class extends Component {
                 return;
             }
 
+            $completionErrors = app(\App\Services\GtkJournalService::class)->completionErrors(Auth::user(), today());
+            if ($completionErrors !== []) {
+                $this->errorMessage = 'Check Out belum dapat dilakukan. '.implode(' ', $completionErrors);
+                return;
+            }
+
             $attendance->check_out_at = now();
             $attendance->check_out_latitude = $latitude;
             $attendance->check_out_longitude = $longitude;
@@ -194,6 +226,7 @@ new class extends Component {
                 . round($distance) . ' meter.';
         }
 
+        app(\App\Services\GtkAttendancePolicyService::class)->captureExpectedTimes($attendance);
         $attendance->save();
 
         $this->attendance = $attendance->fresh();
@@ -232,13 +265,31 @@ new class extends Component {
 ?>
 
 <div x-data="gtkAttendance" class="space-y-6">
+    @if (auth()->user()->gtk_id && !$attendance?->gtk_absence_request_id)
+        @php
+            $journalRequirements = app(\App\Services\GtkJournalService::class)->requirements(auth()->user(), today());
+        @endphp
+        <div class="rounded-xl border border-zinc-200 p-4 dark:border-zinc-700">
+            <flux:heading>LCKH dan jurnal: {{ $journalRequirements['ready'] ? 'lengkap' : 'belum lengkap' }}</flux:heading>
+            <flux:text>Check Out hanya dapat dilakukan setelah LCKH dan seluruh jurnal mengajar wajib hari ini selesai. Persetujuan kepala madrasah untuk LCKH tidak diperlukan untuk Check Out.</flux:text>
+            <flux:text>LCKH: {{ $journalRequirements['lckh'] ? 'lengkap' : 'belum lengkap' }}.</flux:text>
+            @if (auth()->user()->canTeach())
+                <flux:text>Jurnal mengajar: {{ $journalRequirements['sessions']->count() - $journalRequirements['missing']->count() }}/{{ $journalRequirements['sessions']->count() }} sesi selesai.</flux:text>
+                <flux:button class="mt-3" :href="route('gtk.journals.index')">Isi Jurnal Mengajar</flux:button>
+            @endif
+            @foreach ($journalRequirements['missing'] as $session)
+                <p class="mt-1 text-sm">Belum lengkap: {{ $session['label'] }}</p>
+            @endforeach
+            <flux:button class="mt-3" :href="route('gtk.lckh.index')">Isi LCKH</flux:button>
+        </div>
+    @endif
     <div>
         <flux:heading size="xl">
             Presensi GTK
         </flux:heading>
 
         <flux:text class="mt-1">
-            Presensi masuk dan pulang menggunakan lokasi GPS.
+            Presensi masuk dan pulang menggunakan lokasi GPS. Jika tidak hadir, gunakan menu Pengajuan Absensi.
         </flux:text>
     </div>
 
@@ -254,6 +305,9 @@ new class extends Component {
         </flux:callout>
     @endif
 
+    @if ($attendance?->gtk_absence_request_id)
+        <flux:callout variant="success" icon="check-circle">Ketidakhadiran hari ini sudah disetujui: {{ $attendance->notes }}</flux:callout>
+    @else
     <div class="grid gap-4 md:grid-cols-2">
 
         {{-- CHECK IN --}}
@@ -326,6 +380,10 @@ new class extends Component {
 
             @elseif ($attendance?->check_in_at)
 
+                @if (!($journalRequirements['ready'] ?? false))
+                <flux:button variant="ghost" class="w-full" disabled>Lengkapi LCKH dan Jurnal Terlebih Dahulu</flux:button>
+                <flux:text class="mt-2">Selesaikan kewajiban yang tercantum di atas, lalu kembali ke halaman ini untuk Check Out.</flux:text>
+                @else
                 <flux:button variant="primary" class="w-full" wire:loading.attr="disabled"
                     x-on:click="getLocation('check_out')" x-bind:disabled="loading">
                     <span x-show="!loading">
@@ -336,6 +394,7 @@ new class extends Component {
                         Mendapatkan lokasi...
                     </span>
                 </flux:button>
+                @endif
 
             @else
 
@@ -349,6 +408,8 @@ new class extends Component {
 
     </div>
 
+
+    @endif
 
     {{-- DETAIL --}}
     @if ($attendance)
@@ -377,8 +438,9 @@ new class extends Component {
                     </flux:text>
 
                     <div class="font-medium capitalize">
-                        {{ $attendance->status }}
+                        {{ $this->monthlyClassifications->get(today()->toDateString())['label'] ?? $attendance->status }}
                     </div>
+                    <x-gtk-attendance-indicators :classification="$this->monthlyClassifications->get(today()->toDateString())" />
                 </div>
 
                 @if ($attendance->check_in_at)
@@ -415,7 +477,23 @@ new class extends Component {
 
     @endif
 
-    <div class="mt-8 space-y-4">
+    <div class="mt-8 space-y-4"
+        x-data="{
+            focusToday(focus = false) {
+                const container = this.$refs.calendar;
+                const today = this.$refs.today;
+                if (!container || !today) return;
+
+                const containerBounds = container.getBoundingClientRect();
+                const todayBounds = today.getBoundingClientRect();
+                container.scrollTo({
+                    left: container.scrollLeft + todayBounds.left - containerBounds.left - (container.clientWidth - todayBounds.width) / 2,
+                    behavior: focus && !window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'smooth' : 'instant',
+                });
+                if (focus) today.focus({ preventScroll: true });
+            }
+        }"
+        x-init="$nextTick(() => focusToday())">
         <div>
             <flux:heading size="lg">
                 Riwayat Presensi
@@ -426,7 +504,11 @@ new class extends Component {
             </flux:subheading>
         </div>
 
-        <div class="overflow-x-auto rounded-xl border border-zinc-200 dark:border-zinc-700">
+        <div class="flex justify-end">
+            <flux:button size="sm" icon="calendar-days" x-on:click="focusToday(true)">Hari Ini</flux:button>
+        </div>
+
+        <div x-ref="calendar" class="overflow-x-auto rounded-xl border border-zinc-200 dark:border-zinc-700">
             <table class="min-w-max w-full text-sm">
                 <thead>
                     <tr>
@@ -437,11 +519,13 @@ new class extends Component {
                                 $isToday = $date['is_today'];
                             @endphp
 
-                            <th class="
+                            <th scope="col"
+                                @if ($isToday) x-ref="today" tabindex="-1" aria-current="date" @endif
+                                class="
                                     min-w-24 border-b border-r px-3 py-3 text-center
                                     last:border-r-0
-                                    {{ $isToday ? 'bg-primary-50 dark:bg-primary-950' : '' }}
-                                    {{ $isSunday || $holiday ? 'text-red-600 dark:text-red-400' : '' }}
+                                    {{ $isToday ? 'bg-blue-100 text-blue-900 ring-2 ring-inset ring-blue-500 dark:bg-blue-950 dark:text-blue-100 dark:ring-blue-400' : '' }}
+                                    {{ !$isToday && ($isSunday || $holiday) ? 'text-red-600 dark:text-red-400' : '' }}
                                 ">
                                 <div class="font-medium">
                                     {{ $date['day_name'] }}
@@ -450,6 +534,10 @@ new class extends Component {
                                 <div class="text-lg font-semibold">
                                     {{ $date['day'] }}
                                 </div>
+
+                                @if ($isToday)
+                                    <div class="mt-1 text-xs font-semibold">Hari Ini</div>
+                                @endif
 
                                 @if ($holiday)
                                     <div class="mt-1 text-xs font-normal">
@@ -478,8 +566,7 @@ new class extends Component {
                             <td class="
                                     border-b border-r px-3 py-3 text-center
                                     last:border-r-0
-                                    {{ $date['is_today'] ? 'bg-primary-50/50 dark:bg-primary-950/50' : '' }}
-                                    {{ $isHoliday ? 'bg-red-50/50 dark:bg-red-950/20' : '' }}
+                                    {{ $date['is_today'] ? 'bg-blue-50 ring-1 ring-inset ring-blue-300 dark:bg-blue-950/60 dark:ring-blue-700' : ($isHoliday ? 'bg-red-50/50 dark:bg-red-950/20' : '') }}
                                 ">
                                 <div class="text-xs text-zinc-500">
                                     Check In
@@ -510,8 +597,7 @@ new class extends Component {
                             <td class="
                                     border-b border-r px-3 py-3 text-center
                                     last:border-r-0
-                                    {{ $date['is_today'] ? 'bg-primary-50/50 dark:bg-primary-950/50' : '' }}
-                                    {{ $isHoliday ? 'bg-red-50/50 dark:bg-red-950/20' : '' }}
+                                    {{ $date['is_today'] ? 'bg-blue-50 ring-1 ring-inset ring-blue-300 dark:bg-blue-950/60 dark:ring-blue-700' : ($isHoliday ? 'bg-red-50/50 dark:bg-red-950/20' : '') }}
                                 ">
                                 <div class="text-xs text-zinc-500">
                                     Check Out
@@ -530,6 +616,19 @@ new class extends Component {
                         @endforeach
                     </tr>
 
+                    <tr>
+                        @foreach ($monthDates as $date)
+                            @php
+                                $dayAttendance = $this->monthlyAttendances[$date['date']] ?? null;
+                                $classification = $this->monthlyClassifications->get($date['date']);
+                            @endphp
+                            <td class="border-b border-r px-3 py-3 text-center last:border-r-0" title="{{ $dayAttendance?->notes }}">
+                                <div class="text-xs text-zinc-500">Status</div>
+                                <div class="mt-1 font-medium">{{ $classification['label'] ?? '-' }}</div>
+                                @if ($classification)<x-gtk-attendance-indicators :classification="$classification" />@endif
+                            </td>
+                        @endforeach
+                    </tr>
                     {{-- Jumlah Jam --}}
                     <tr>
                         @foreach ($monthDates as $date)
@@ -549,8 +648,7 @@ new class extends Component {
                             <td class="
                                     px-3 py-3 text-center border-r
                                     last:border-r-0
-                                    {{ $date['is_today'] ? 'bg-primary-50/50 dark:bg-primary-950/50' : '' }}
-                                    {{ $isHoliday ? 'bg-red-50/50 dark:bg-red-950/20' : '' }}
+                                    {{ $date['is_today'] ? 'bg-blue-50 ring-1 ring-inset ring-blue-300 dark:bg-blue-950/60 dark:ring-blue-700' : ($isHoliday ? 'bg-red-50/50 dark:bg-red-950/20' : '') }}
                                 ">
                                 <div class="text-xs text-zinc-500">
                                     Jml Jam

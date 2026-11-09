@@ -30,6 +30,11 @@ new class extends \Livewire\Component {
 
     public string $keterangan = '';
 
+    public function boot(): void
+    {
+        abort_unless(auth()->user()?->canManageLetters(), 403);
+    }
+
     public function updatedSearch(): void
     {
         $this->resetPage();
@@ -105,14 +110,15 @@ new class extends \Livewire\Component {
         }
 
         $letter->save();
+        $wasEditing = $this->editingId !== null;
 
         $this->closeModal();
 
         session()->flash(
             'success',
-            $this->editingId
+            $wasEditing
             ? 'Surat masuk berhasil diperbarui.'
-            : 'Surat masuk berhasil ditambahkan.'
+            : 'Surat masuk berhasil ditambahkan dan tersedia untuk disposisi Kepala Madrasah.'
         );
     }
 
@@ -161,6 +167,7 @@ new class extends \Livewire\Component {
     public function render()
     {
         $letters = IncomingLetter::query()
+            ->withCount(['dispositions', 'dispositions as completed_dispositions_count' => fn ($query) => $query->where('status', 'completed')])
             ->when(
                 $this->search,
                 function ($query) {
@@ -192,7 +199,7 @@ new class extends \Livewire\Component {
             </flux:heading>
 
             <flux:subheading>
-                Kelola arsip surat yang diterima madrasah.
+                Catat surat masuk untuk didisposisikan Kepala Madrasah, lalu pantau tindak lanjutnya.
             </flux:subheading>
         </div>
 
@@ -246,6 +253,8 @@ new class extends \Livewire\Component {
                             Perihal
                         </th>
 
+                        <th class="px-4 py-3 text-left">Status Disposisi</th>
+
                         <th class="px-4 py-3 text-center">
                             File
                         </th>
@@ -297,6 +306,8 @@ new class extends \Livewire\Component {
                                 @endif
                             </td>
 
+                            <td class="px-4 py-3"><x-incoming-letter-disposition-status :letter="$letter" /></td>
+
                             <td class="px-4 py-3 text-center">
                                 @if ($letter->file)
                                     <a href="{{ Storage::disk('public')->url($letter->file) }}" target="_blank"
@@ -315,8 +326,8 @@ new class extends \Livewire\Component {
                             <td class="px-4 py-3">
                                 <div class="flex justify-end gap-1">
                                     <flux:button size="sm" variant="ghost" icon="arrow-right-circle"
-                                        :href="route('admin.incoming-letters.dispositions',$letter)">
-                                        Disposisi
+                                        :href="route((auth()->user()->isStaff() ? 'staff.' : 'admin.').'incoming-letters.dispositions',$letter)">
+                                        Pantau Disposisi
                                     </flux:button>
                                     <flux:button size="sm" variant="ghost" icon="pencil"
                                         wire:click="edit({{ $letter->id }})">
@@ -337,7 +348,7 @@ new class extends \Livewire\Component {
                     @empty
 
                         <tr>
-                            <td colspan="7" class="px-4 py-12 text-center">
+                            <td colspan="8" class="px-4 py-12 text-center">
                                 <div class="text-zinc-500">
                                     Belum ada data surat masuk.
                                 </div>

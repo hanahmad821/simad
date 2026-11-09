@@ -2,12 +2,14 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class IncomingLetter extends Model
 {
+    /** @use HasFactory<Factory<static>> */
     use HasFactory;
 
     protected $fillable = [
@@ -27,6 +29,8 @@ class IncomingLetter extends Model
             'tanggal_masuk' => 'date',
         ];
     }
+
+    /** @return HasMany<LetterDisposition, $this> */
     public function dispositions(): HasMany
     {
         return $this->hasMany(

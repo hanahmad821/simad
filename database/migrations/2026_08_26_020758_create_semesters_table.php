@@ -1,27 +1,12 @@
 <?php
 
 use Illuminate\Database\Migrations\Migration;
-use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    /**
-     * Run the migrations.
-     */
-    public function up(): void
-    {
-        Schema::create('semesters', function (Blueprint $table) {
-            $table->id();
-            $table->timestamps();
-        });
-    }
+    // Historical scaffold, superseded by 2026_08_26_021543_create_semesters_table.php.
+    // Keep this filename so existing migration ledgers remain valid.
+    public function up(): void {}
 
-    /**
-     * Reverse the migrations.
-     */
-    public function down(): void
-    {
-        Schema::dropIfExists('semesters');
-    }
+    public function down(): void {}
 };

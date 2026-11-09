@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -17,14 +18,12 @@ class TeachingAssignment extends Model
         'school_class_id',
         'academic_year_id',
         'semester_id',
-        'teaching_hours',
         'is_active',
     ];
 
     protected function casts(): array
     {
         return [
-            'teaching_hours' => 'integer',
             'is_active' => 'boolean',
         ];
     }
@@ -51,10 +50,27 @@ class TeachingAssignment extends Model
 
     public function semester(): BelongsTo
     {
+        // Legacy metadata only. KBM assignments are scoped by academic_year_id.
         return $this->belongsTo(Semester::class);
     }
+
     public function schedules(): HasMany
     {
         return $this->hasMany(Schedule::class);
+    }
+
+    /** @return HasMany<Schedule, $this> */
+    public function activeSchedules(): HasMany
+    {
+        return $this->schedules()->where('is_active', true)
+            ->whereHas('lessonPeriod', fn ($query) => $query->where('is_active', true)
+                ->where('is_break', false)->where('period_number', '>', 0)
+                ->where(fn ($query) => $query->whereNull('day_of_week')->orWhereColumn('lesson_periods.day_of_week', 'schedules.day_of_week')));
+    }
+
+    /** @return Attribute<int, never> */
+    protected function scheduledHours(): Attribute
+    {
+        return Attribute::get(fn ($value) => $value !== null ? (int) $value : $this->activeSchedules()->count());
     }
 }

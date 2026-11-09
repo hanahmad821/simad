@@ -27,6 +27,7 @@ class Schedule extends Model
         ];
     }
 
+    /** @return BelongsTo<TeachingAssignment, $this> */
     public function teachingAssignment(): BelongsTo
     {
         return $this->belongsTo(TeachingAssignment::class);

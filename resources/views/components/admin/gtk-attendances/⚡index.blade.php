@@ -3,6 +3,8 @@
 use App\Models\Gtk;
 use App\Models\GtkAttendance;
 use App\Models\Holiday;
+use App\Services\GtkAttendancePolicyService;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Carbon\Carbon;
 use Carbon\CarbonInterface;
 use Livewire\WithPagination;
@@ -16,14 +18,10 @@ new class extends \Livewire\Component {
 
     public string $status = '';
 
-    // Modal update status
-    public bool $showStatusModal = false;
-
-    public string $statusGtkId = '';
-
-    public string $statusValue = 'leave';
-
-    public string $statusNotes = '';
+    public function boot(): void
+    {
+        abort_unless(auth()->user()?->hasActiveRole(['admin', 'staff']), 403);
+    }
 
     public function mount(): void
     {
@@ -54,83 +52,6 @@ new class extends \Livewire\Component {
         $this->resetPage();
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Update Status
-    |--------------------------------------------------------------------------
-    */
-
-    public function openStatusModal(int $gtkId, string $status = 'leave'): void
-    {
-        $this->statusGtkId = (string) $gtkId;
-        $this->statusValue = $status;
-        $this->statusNotes = '';
-        $this->showStatusModal = true;
-    }
-
-    public function closeStatusModal(): void
-    {
-        $this->showStatusModal = false;
-        $this->statusGtkId = '';
-        $this->statusValue = 'leave';
-        $this->statusNotes = '';
-    }
-
-    public function updateStatus(): void
-    {
-        $this->validate([
-            'statusGtkId' => ['required', 'exists:gtks,id'],
-            'statusValue' => ['required', 'in:leave,sick'],
-            'statusNotes' => ['nullable', 'string', 'max:1000'],
-        ]);
-
-        $gtk = Gtk::query()
-            ->where('is_active', true)
-            ->findOrFail($this->statusGtkId);
-
-        $attendance = GtkAttendance::firstOrNew([
-            'gtk_id' => $gtk->id,
-            'attendance_date' => $this->date,
-        ]);
-
-        $attendance->status = $this->statusValue;
-        $attendance->notes = $this->statusNotes ?: null;
-
-        $attendance->save();
-
-        $this->closeStatusModal();
-
-        session()->flash(
-            'success',
-            "Status {$gtk->full_name} berhasil diperbarui."
-        );
-    }
-
-    /*
-    |--------------------------------------------------------------------------
-    | Remove Status
-    |--------------------------------------------------------------------------
-    */
-
-    public function resetAttendanceStatus(int $gtkId): void
-    {
-        $attendance = GtkAttendance::query()
-            ->where('gtk_id', $gtkId)
-            ->whereDate('attendance_date', $this->date)
-            ->first();
-
-        if (!$attendance) {
-            return;
-        }
-
-        $attendance->delete();
-
-        session()->flash(
-            'success',
-            'Status presensi berhasil dihapus.'
-        );
-    }
-
     public function render()
     {
         /*
@@ -151,19 +72,28 @@ new class extends \Livewire\Component {
         */
 
         $todayAttendances = GtkAttendance::query()
+            ->with('gtk')
             ->whereDate('attendance_date', $this->date)
             ->get()
             ->keyBy('gtk_id');
 
         $totalGtk = $gtks->count();
 
-        $presentCount = $todayAttendances
-            ->where('status', 'present')
-            ->count();
+        $policy = app(GtkAttendancePolicyService::class);
+        $context = $policy->context(Carbon::parse($this->date));
+        $records = $todayAttendances->values();
+        if ($this->date < today()->toDateString() && $context['is_workday']) {
+            foreach ($gtks as $gtk) {
+                if (! $todayAttendances->has($gtk->id)) {
+                    $records->push((new GtkAttendance(['gtk_id' => $gtk->id, 'attendance_date' => $this->date, 'status' => 'absent']))->setRelation('gtk', $gtk));
+                }
+            }
+        }
+        $classifications = $records->mapWithKeys(fn ($row) => [$row->gtk_id => $policy->evaluate(Carbon::parse($this->date), $row, $context)]);
+        $presentCount = $classifications->where('status', 'present')->count();
 
-        $lateCount = $todayAttendances
-            ->where('status', 'late')
-            ->count();
+        $lateCount = $classifications->where('status', 'late')->count();
+        $absentCount = $classifications->where('status', 'absent')->count();
 
         $leaveCount = $todayAttendances
             ->where('status', 'leave')
@@ -191,25 +121,16 @@ new class extends \Livewire\Component {
         |--------------------------------------------------------------------------
         */
 
-        $attendances = GtkAttendance::query()
-            ->with('gtk')
-            ->whereDate('attendance_date', $this->date)
-            ->when(
-                $this->gtkId,
-                fn($query) => $query->where('gtk_id', $this->gtkId)
-            )
-            ->when(
-                $this->status,
-                fn($query) => $query->where('status', $this->status)
-            )
-            ->orderByRaw("
-                CASE
-                    WHEN check_in_at IS NULL THEN 1
-                    ELSE 0
-                END
-            ")
-            ->orderBy('check_in_at')
-            ->paginate(15);
+        $filtered = $records->filter(function ($row) use ($classifications) {
+            $classification = $classifications->get($row->gtk_id);
+            return (! $this->gtkId || $row->gtk_id === (int) $this->gtkId)
+                && (! $this->status || $classification['status'] === $this->status
+                    || strtolower($classification['late_level'] ?? '') === $this->status
+                    || strtolower($classification['early_level'] ?? '') === $this->status);
+        })->sortBy(fn ($row) => ($row->check_in_at?->format('H:i:s') ?? '99:99:99').$row->gtk?->full_name)->values();
+        $page = $this->getPage();
+        $attendances = new LengthAwarePaginator($filtered->slice(($page - 1) * 15, 15)->values(), $filtered->count(), 15, $page,
+            ['path' => route((auth()->user()->isAdmin() ? 'admin' : 'staff').'.gtk-attendances.index')]);
 
         /*
         |--------------------------------------------------------------------------
@@ -232,6 +153,8 @@ new class extends \Livewire\Component {
             'totalGtk' => $totalGtk,
             'presentCount' => $presentCount,
             'lateCount' => $lateCount,
+            'absentCount' => $absentCount,
+            'classifications' => $classifications,
             'leaveCount' => $leaveCount,
             'sickCount' => $sickCount,
             'notAttendedCount' => $notAttendedCount,
@@ -269,18 +192,10 @@ new class extends \Livewire\Component {
             </flux:heading>
 
             <flux:subheading>
-                Pantau kehadiran GTK pada tanggal tertentu.
+                Pantau kehadiran GTK pada tanggal tertentu. Izin, cuti, dan sakit dicatat melalui pengajuan GTK setelah disetujui kepala madrasah.
             </flux:subheading>
         </div>
     </div>
-
-
-    {{-- Flash message --}}
-    @if (session()->has('success'))
-        <flux:callout variant="success" icon="check-circle" dismissible>
-            {{ session('success') }}
-        </flux:callout>
-    @endif
 
 
     {{-- Statistik --}}
@@ -400,8 +315,11 @@ new class extends \Livewire\Component {
                 </flux:select.option>
 
                 <flux:select.option value="absent">
-                    Tidak Hadir
+                    Alpa
                 </flux:select.option>
+                @foreach (['t1' => 'T1', 't2' => 'T2', 't3' => 'T3', 'psw1' => 'PSW1', 'psw2' => 'PSW2', 'psw3' => 'PSW3'] as $value => $label)
+                    <flux:select.option value="{{ $value }}">{{ $label }}</flux:select.option>
+                @endforeach
 
                 <flux:select.option value="leave">
                     Izin / Cuti
@@ -423,6 +341,13 @@ new class extends \Livewire\Component {
 
 
     {{-- Informasi hari libur --}}
+    <flux:callout icon="clock">
+        Presensi dihitung otomatis tanpa approval. T1 / PSW1: sampai 30 menit; T2 / PSW2: lebih dari 30 sampai 60 menit; T3 / PSW3: lebih dari 60 menit. Lupa pulang: PSW3. Alpa: {{ $absentCount }} GTK.
+        <div class="mt-2 flex flex-wrap gap-3 text-sm">
+            @foreach (['T1', 'T2', 'T3'] as $level)<span>{{ $level }}: {{ $classifications->where('late_level', $level)->count() }}</span>@endforeach
+            @foreach (['PSW1', 'PSW2', 'PSW3'] as $level)<span>{{ $level }}: {{ $classifications->where('early_level', $level)->count() }}</span>@endforeach
+        </div>
+    </flux:callout>
     @if ($holiday || $isSunday)
         <flux:callout variant="warning" icon="calendar-days">
             @if ($holiday)
@@ -444,7 +369,7 @@ new class extends \Livewire\Component {
             <div class="mb-4 flex items-center justify-between gap-4">
                 <div>
                     <flux:heading size="lg">
-                        Belum Presensi
+                        {{ $date < today()->toDateString() ? 'Alpa / Tanpa Presensi' : 'Belum Presensi' }}
                     </flux:heading>
 
                     <flux:subheading>
@@ -471,25 +396,10 @@ new class extends \Livewire\Component {
                             @endif
                         </div>
 
-                        <flux:button size="sm" variant="ghost" icon="calendar"
-                            wire:click="openStatusModal({{ $gtk->id }}, 'leave')">
-                            Status
-                        </flux:button>
-
                     </div>
                 @endforeach
 
             </div>
-        </div>
-    @endif
-
-
-    {{-- Tombol update status --}}
-    @if (!$holiday && !$isSunday)
-        <div class="flex justify-end">
-            <flux:button variant="primary" icon="calendar" wire:click="openStatusModal(0, 'leave')">
-                Update Izin / Cuti / Sakit
-            </flux:button>
         </div>
     @endif
 
@@ -539,7 +449,8 @@ new class extends \Livewire\Component {
                                 $attendance->check_out_at
                             );
 
-                            $statusColor = match ($attendance->status) {
+                            $classification = $classifications->get($attendance->gtk_id);
+                            $statusColor = match ($classification['status']) {
                                 'present' => 'green',
                                 'late' => 'yellow',
                                 'absent' => 'red',
@@ -548,17 +459,10 @@ new class extends \Livewire\Component {
                                 default => 'zinc',
                             };
 
-                            $statusLabel = match ($attendance->status) {
-                                'present' => 'Hadir',
-                                'late' => 'Terlambat',
-                                'absent' => 'Tidak Hadir',
-                                'leave' => 'Izin / Cuti',
-                                'sick' => 'Sakit',
-                                default => ucfirst($attendance->status),
-                            };
+                            $statusLabel = $classification['label'];
                         @endphp
 
-                        <tr wire:key="attendance-{{ $attendance->id }}">
+                        <tr wire:key="attendance-{{ $attendance->gtk_id }}">
 
                             {{-- GTK --}}
                             <td class="px-4 py-3">
@@ -593,6 +497,7 @@ new class extends \Livewire\Component {
                                 <flux:badge :color="$statusColor">
                                     {{ $statusLabel }}
                                 </flux:badge>
+                                <x-gtk-attendance-indicators :classification="$classification" />
                             </td>
 
                             {{-- Catatan --}}
@@ -626,61 +531,5 @@ new class extends \Livewire\Component {
     {{-- Pagination --}}
     {{ $attendances->links() }}
 
-
-    {{-- Modal Update Status --}}
-    <flux:modal wire:model="showStatusModal" class="md:w-[500px]">
-        <div class="space-y-6">
-
-            <div>
-                <flux:heading size="lg">
-                    Update Status Presensi
-                </flux:heading>
-
-                <flux:subheading>
-                    Atur status izin, cuti, atau sakit untuk GTK.
-                </flux:subheading>
-            </div>
-
-
-            <flux:select label="GTK" wire:model="statusGtkId">
-                <flux:select.option value="">
-                    Pilih GTK
-                </flux:select.option>
-
-                @foreach ($gtks as $gtk)
-                    <flux:select.option value="{{ $gtk->id }}">
-                        {{ $gtk->full_name }}
-                    </flux:select.option>
-                @endforeach
-            </flux:select>
-
-
-            <flux:select label="Status" wire:model="statusValue">
-                <flux:select.option value="leave">
-                    Izin / Cuti
-                </flux:select.option>
-
-                <flux:select.option value="sick">
-                    Sakit
-                </flux:select.option>
-            </flux:select>
-
-
-            <flux:textarea label="Catatan" wire:model="statusNotes" placeholder="Contoh: Izin keperluan keluarga..."
-                rows="3" />
-
-
-            <div class="flex justify-end gap-2">
-                <flux:button variant="ghost" wire:click="closeStatusModal">
-                    Batal
-                </flux:button>
-
-                <flux:button variant="primary" wire:click="updateStatus" wire:loading.attr="disabled">
-                    Simpan
-                </flux:button>
-            </div>
-
-        </div>
-    </flux:modal>
 
 </div>

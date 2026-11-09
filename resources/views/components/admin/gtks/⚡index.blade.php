@@ -5,6 +5,7 @@ use App\Models\User;
 use Illuminate\Validation\Rule;
 use Illuminate\Support\Str;
 use Livewire\Component;
+use Livewire\Attributes\Locked;
 use Livewire\WithPagination;
 
 new class extends Component {
@@ -13,6 +14,111 @@ new class extends Component {
     public string $search = '';
 
     public bool $showForm = false;
+
+    public bool $showRoleForm = false;
+    #[Locked]
+    public ?int $roleUserId = null;
+    #[Locked]
+    public string $roleUserName = '';
+    #[Locked]
+    public string $roleUserEmail = '';
+    public string $accountRole = '';
+    public string $accountSecondaryRole = '';
+
+    public function boot(): void
+    {
+        abort_unless(auth()->user()?->isAdmin(), 403);
+    }
+
+    public function openRoles(int $gtkId): void
+    {
+        $this->closeRoles();
+        $user = Gtk::findOrFail($gtkId)->user;
+        abort_unless($user, 403, 'Buat akun GTK terlebih dahulu.');
+        $this->roleUserId = $user->id;
+        $this->roleUserName = $user->name;
+        $this->roleUserEmail = $user->email;
+        $this->accountRole = $user->role;
+        $this->accountSecondaryRole = $user->secondary_role ?? '';
+        $this->showRoleForm = true;
+    }
+
+    public function saveRoles(\App\Services\UserRoleService $service): void
+    {
+        abort_unless($this->roleUserId, 403);
+        try {
+            $service->update(auth()->user(), User::findOrFail($this->roleUserId), [
+                'role' => $this->accountRole, 'secondary_role' => $this->accountSecondaryRole,
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $exception) {
+            foreach ($exception->errors() as $field => $messages) {
+                foreach ($messages as $message) {
+                    $this->addError($field === 'secondary_role' ? 'accountSecondaryRole' : 'accountRole', $message);
+                }
+            }
+            return;
+        }
+        $this->closeRoles();
+        session()->flash('success', 'Role akun berhasil diperbarui.');
+    }
+
+    public function closeRoles(): void
+    {
+        $this->reset('showRoleForm', 'roleUserId', 'roleUserName', 'roleUserEmail', 'accountRole', 'accountSecondaryRole');
+        $this->resetValidation(['accountRole', 'accountSecondaryRole']);
+    }
+
+    public function updatedShowRoleForm(bool $value): void
+    {
+        if (! $value) $this->closeRoles();
+    }
+
+    public function updatedAccountRole(string $value): void
+    {
+        if ($value === $this->accountSecondaryRole) $this->accountSecondaryRole = '';
+    }
+
+    public bool $showPasswordReset = false;
+    #[Locked]
+    public ?int $passwordResetUserId = null;
+    #[Locked]
+    public string $passwordResetName = '';
+    #[Locked]
+    public string $passwordResetEmail = '';
+    public string $newPassword = '';
+    public string $newPassword_confirmation = '';
+
+    public function openPasswordReset(int $gtkId): void
+    {
+        abort_unless(auth()->user()->isAdmin(), 403);
+        $this->closePasswordReset();
+        $gtk = Gtk::with('user')->findOrFail($gtkId);
+        abort_unless($gtk->user && $gtk->user->id !== auth()->id(), 403);
+        $this->passwordResetUserId = $gtk->user->id;
+        $this->passwordResetName = $gtk->user->name;
+        $this->passwordResetEmail = $gtk->user->email;
+        $this->showPasswordReset = true;
+    }
+
+    public function resetUserPassword(\App\Services\AdminPasswordResetService $service): void
+    {
+        abort_unless(auth()->user()->isAdmin() && $this->passwordResetUserId, 403);
+        $target = User::findOrFail($this->passwordResetUserId);
+        $service->reset(auth()->user(), $target, $this->only(['newPassword', 'newPassword_confirmation']));
+        $this->closePasswordReset();
+        session()->flash('success', 'Password akun '.$target->name.' berhasil direset. Sampaikan password baru kepada pengguna untuk login kembali.');
+    }
+
+    public function closePasswordReset(): void
+    {
+        $this->reset('showPasswordReset', 'passwordResetUserId', 'passwordResetName', 'passwordResetEmail', 'newPassword', 'newPassword_confirmation');
+        $this->resetValidation(['newPassword', 'newPassword_confirmation']);
+    }
+
+    public function updatedShowPasswordReset(bool $value): void
+    {
+        if (! $value) $this->closePasswordReset();
+    }
 
     public ?int $editingId = null;
 
@@ -56,7 +162,7 @@ new class extends Component {
         $this->birth_date = $gtk->birth_date?->format('Y-m-d') ?? '';
         $this->employment_status = $gtk->employment_status ?? '';
         $this->employee_number = $gtk->employee_number ?? null;
-        $this->position = $gtk->position ?? '';
+        $this->position = in_array($gtk->position, ['Staf Tata Usaha', 'Tenaga Kependidikan'], true) ? 'Staff' : ($gtk->position ?? '');
         $this->phone = $gtk->phone ?? '';
         $this->email = $gtk->email ?? '';
         $this->address = $gtk->address ?? null;
@@ -65,6 +171,18 @@ new class extends Component {
         $this->resetValidation();
 
         $this->showForm = true;
+    }
+
+    public function positionOptions(): array
+    {
+        $options = ['Kepala Madrasah', 'Guru Mata Pelajaran', 'Staff'];
+        $existing = $this->editingId ? Gtk::findOrFail($this->editingId)->position : null;
+
+        if ($existing && ! in_array($existing, [...$options, 'Staf Tata Usaha', 'Tenaga Kependidikan'], true)) {
+            $options[] = $existing;
+        }
+
+        return $options;
     }
 
     public function save(): void
@@ -102,7 +220,7 @@ new class extends Component {
 
             'employee_number' => ['nullable', 'string', 'max:50'],
 
-            'position' => ['nullable', 'string', 'max:100'],
+            'position' => ['required', Rule::in($this->positionOptions())],
 
             'phone' => ['nullable', 'string', 'max:30'],
 
@@ -285,7 +403,9 @@ new class extends Component {
                         $query
                             ->where('full_name', 'like', '%' . $this->search . '%')
                             ->orWhere('nip', 'like', '%' . $this->search . '%')
-                            ->orWhere('nuptk', 'like', '%' . $this->search . '%');
+                            ->orWhere('nuptk', 'like', '%' . $this->search . '%')
+                            ->orWhere('email', 'like', '%' . $this->search . '%')
+                            ->orWhereHas('user', fn ($user) => $user->where('email', 'like', '%' . $this->search . '%'));
                     });
                 })
                 ->orderBy('full_name')
@@ -296,6 +416,47 @@ new class extends Component {
 ?>
 
 <div class="flex flex-col gap-6">
+
+    <flux:modal name="edit-account-roles" wire:model="showRoleForm" class="md:w-xl">
+        <form wire:submit="saveRoles" class="space-y-5">
+            <div>
+                <flux:heading size="lg">Atur Role Akun</flux:heading>
+                <flux:text class="mt-1">{{ $roleUserName }} · {{ $roleUserEmail }}</flux:text>
+            </div>
+            <flux:text>Satu akun dapat memiliki maksimal dua role. Role utama digunakan saat login. Pengguna dapat berganti role melalui menu nama pada sidebar.</flux:text>
+            <flux:select label="Role utama" wire:model.live="accountRole" required>
+                @foreach (User::ROLE_LABELS as $value => $label)
+                    <option value="{{ $value }}">{{ $label }}</option>
+                @endforeach
+            </flux:select>
+            <flux:select label="Role kedua (opsional)" wire:model="accountSecondaryRole">
+                <option value="">Tanpa role kedua</option>
+                @foreach (User::ROLE_LABELS as $value => $label)
+                    <option value="{{ $value }}" @disabled($value === $accountRole)>{{ $label }}</option>
+                @endforeach
+            </flux:select>
+            <div class="flex justify-end gap-2">
+                <flux:button type="button" wire:click="closeRoles">Batal</flux:button>
+                <flux:button type="submit" variant="primary">Simpan Role</flux:button>
+            </div>
+        </form>
+    </flux:modal>
+
+    <flux:modal name="reset-user-password" wire:model="showPasswordReset" class="md:w-xl">
+        <form wire:submit="resetUserPassword" class="space-y-5">
+            <div>
+                <flux:heading size="lg">Reset Password Pengguna</flux:heading>
+                <flux:text class="mt-1">{{ $passwordResetName }} · {{ $passwordResetEmail }}</flux:text>
+            </div>
+            <flux:text>Password lama akan diganti. Pengguna perlu login kembali menggunakan password baru.</flux:text>
+            <flux:input type="password" label="Password Baru" wire:model="newPassword" autocomplete="new-password" required viewable />
+            <flux:input type="password" label="Konfirmasi Password Baru" wire:model="newPassword_confirmation" autocomplete="new-password" required viewable />
+            <div class="flex justify-end gap-2">
+                <flux:button type="button" wire:click="closePasswordReset">Batal</flux:button>
+                <flux:button type="submit" variant="primary" wire:loading.attr="disabled" wire:target="resetUserPassword">Simpan Password Baru</flux:button>
+            </div>
+        </form>
+    </flux:modal>
 
     {{-- Header --}}
     <div class="flex items-center justify-between gap-4">
@@ -335,7 +496,7 @@ new class extends Component {
 
         {{-- Search --}}
         <div class="mb-5 max-w-md">
-            <flux:input wire:model.live.debounce.300ms="search" placeholder="Cari nama, NIP, atau NUPTK..."
+            <flux:input wire:model.live.debounce.300ms="search" placeholder="Cari nama, NIP, NUPTK, atau email..."
                 icon="magnifying-glass" />
         </div>
 
@@ -361,7 +522,7 @@ new class extends Component {
                         </th>
 
                         <th class="px-4 py-3 text-left">
-                            Status Kepegawaian
+                            Email
                         </th>
 
                         <th class="px-4 py-3 text-left">
@@ -369,11 +530,7 @@ new class extends Component {
                         </th>
 
                         <th class="px-4 py-3 text-center">
-                            Status
-                        </th>
-
-                        <th class="px-4 py-3 text-center">
-                            Akun
+                            Status / Akun
                         </th>
 
                         <th class="px-4 py-3 text-right">
@@ -431,84 +588,71 @@ new class extends Component {
                             </td>
 
 
-                            {{-- Status Kepegawaian --}}
+                            {{-- Email akun login, atau email GTK jika belum memiliki akun --}}
                             <td class="px-4 py-3">
-                                @if ($gtk->employment_status === 'pns')
-                                    PNS
-                                @elseif ($gtk->employment_status === 'non_pns')
-                                    Non-PNS
-                                @elseif ($gtk->employment_status === 'yayasan')
-                                    Yayasan
-                                @else
-                                    -
-                                @endif
+                                {{ $gtk->user?->email ?: ($gtk->email ?: '-') }}
                             </td>
 
 
                             {{-- Jabatan --}}
                             <td class="px-4 py-3">
-                                {{ $gtk->position ?: '-' }}
+                                {{ in_array($gtk->position, ['Staf Tata Usaha', 'Tenaga Kependidikan'], true) ? 'Staff' : ($gtk->position ?: '-') }}
                             </td>
 
 
-                            {{-- Status --}}
+                            {{-- Status GTK dan ketersediaan akun --}}
                             <td class="px-4 py-3 text-center">
-
-                                @if ($gtk->is_active)
-
-                                    <flux:badge color="green">
-                                        Aktif
+                                <div class="flex flex-col items-center gap-1">
+                                    <flux:badge size="sm" :color="$gtk->is_active ? 'green' : 'zinc'">
+                                        {{ $gtk->is_active ? 'Aktif' : 'Tidak Aktif' }}
                                     </flux:badge>
-
-                                @else
-
-                                    <flux:badge color="zinc">
-                                        Tidak Aktif
-                                    </flux:badge>
-
-                                @endif
-
-                            </td>
-
-                            <td class="px-4 py-3 text-center">
-                                @if ($gtk->user)
-                                    <flux:badge color="green">
-                                        Aktif
-                                    </flux:badge>
-                                @else
-                                    <flux:badge color="zinc">
-                                        Belum Ada
-                                    </flux:badge>
-                                @endif
-                            </td>
-
-
-                            {{-- Action --}}
-                            <td class="px-4 py-3">
-
-                                <div class="flex justify-end gap-2">
-                                    @if (!$gtk->user)
-                                        <flux:button size="sm" icon="key" wire:click="generateAccount({{ $gtk->id }})"
-                                            wire:confirm="Buat akun untuk {{ $gtk->full_name }}?">
-                                            Buat Akun
-                                        </flux:button>
+                                    <span class="whitespace-nowrap text-xs text-zinc-500 dark:text-zinc-400">
+                                        {{ $gtk->user ? 'Akun tersedia' : 'Belum ada akun' }}
+                                    </span>
+                                    @if ($gtk->user)
+                                        <div class="flex flex-wrap justify-center gap-1">
+                                            @foreach ($gtk->user->roleNames() as $assignedRole)
+                                                <flux:badge size="sm" color="blue">{{ User::ROLE_LABELS[$assignedRole] }}</flux:badge>
+                                            @endforeach
+                                        </div>
                                     @endif
-
-                                    <flux:button size="sm" icon="eye" :href="route('admin.gtks.show', $gtk)" wire:navigate>
-                                        Detail
-                                    </flux:button>
-
-                                    <flux:button size="sm" icon="pencil-square" wire:click="edit({{ $gtk->id }})">
-                                        Edit
-                                    </flux:button>
-
-                                    <flux:button size="sm" variant="danger" icon="trash" wire:click="delete({{ $gtk->id }})"
-                                        wire:confirm="Yakin ingin menghapus data {{ $gtk->full_name }}?">
-                                        Hapus
-                                    </flux:button>
-
                                 </div>
+                            </td>
 
+                            {{-- Menu aksi --}}
+                            <td class="px-4 py-3 text-right">
+                                <flux:dropdown position="bottom" align="end">
+                                    <flux:button size="sm" variant="ghost" icon="ellipsis-vertical"
+                                        aria-label="Aksi untuk {{ $gtk->full_name }}" />
+                                    <flux:menu>
+                                        <flux:menu.item icon="eye" :href="route('admin.gtks.show', $gtk)" wire:navigate>
+                                            Detail
+                                        </flux:menu.item>
+                                        <flux:menu.item icon="pencil-square" wire:click="edit({{ $gtk->id }})">
+                                            Edit
+                                        </flux:menu.item>
+                                        @if (!$gtk->user)
+                                            <flux:menu.item icon="key" wire:click="generateAccount({{ $gtk->id }})"
+                                                wire:confirm="Buat akun untuk {{ $gtk->full_name }}?">
+                                                Buat Akun
+                                            </flux:menu.item>
+                                        @elseif ($gtk->user->id !== auth()->id())
+                                            <flux:menu.item icon="key" wire:click="openPasswordReset({{ $gtk->id }})">
+                                                Reset Password
+                                            </flux:menu.item>
+                                        @endif
+                                        @if ($gtk->user)
+                                            <flux:menu.item icon="user-group" wire:click="openRoles({{ $gtk->id }})">
+                                                Atur Role
+                                            </flux:menu.item>
+                                        @endif
+                                        <flux:menu.separator />
+                                        <flux:menu.item variant="danger" icon="trash" wire:click="delete({{ $gtk->id }})"
+                                            wire:confirm="Yakin ingin menghapus data {{ $gtk->full_name }}?">
+                                            Hapus
+                                        </flux:menu.item>
+                                    </flux:menu>
+                                </flux:dropdown>
                             </td>
 
                         </tr>
@@ -645,7 +789,13 @@ new class extends Component {
                 </div>
 
 
-                <flux:input label="Jabatan" wire:model="position" placeholder="Contoh: Guru Mata Pelajaran" />
+                <flux:select label="Jabatan" wire:model="position" required>
+                    <flux:select.option value="">Pilih jabatan</flux:select.option>
+                    @foreach ($this->positionOptions() as $option)
+                        <flux:select.option :value="$option">{{ $option }}</flux:select.option>
+                    @endforeach
+                </flux:select>
+                <flux:description>Jabatan menentukan role saat akun dibuat: Kepala Madrasah, Guru, atau Staf.</flux:description>
 
             </div>
 

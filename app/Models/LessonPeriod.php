@@ -12,6 +12,8 @@ class LessonPeriod extends Model
 
     protected $fillable = [
         'period_number',
+        'day_of_week',
+        'sort_order',
         'name',
         'start_time',
         'end_time',
@@ -23,10 +25,13 @@ class LessonPeriod extends Model
     {
         return [
             'period_number' => 'integer',
+            'day_of_week' => 'integer',
+            'sort_order' => 'integer',
             'is_break' => 'boolean',
             'is_active' => 'boolean',
         ];
     }
+
     public function schedules(): HasMany
     {
         return $this->hasMany(Schedule::class);
